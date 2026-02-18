@@ -29,7 +29,7 @@ def load_data():
     If the static-info columns are absent, sensible defaults are used so the
     dashboard still loads; just fill them in to unlock all features.
     """
-    EXCEL_PATH = "/Users/tevajanura/Downloads/portfolio_holdings.xlsx"
+    EXCEL_PATH = "portfolio_holdings.xlsx"
     xl         = pd.ExcelFile(EXCEL_PATH)
     sheet_names = xl.sheet_names
     print(f"Sheets found in Excel: {sheet_names}")
