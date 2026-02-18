@@ -428,7 +428,7 @@ st.markdown("""
 st.sidebar.title("Navigation")
 
 try:
-    st.sidebar.image("Screenshot 2026-01-29 at 17.22.15.png", use_container_width=True)
+    st.sidebar.image("HIC_Capital_Logo.png", use_container_width=True)
     st.sidebar.markdown("---")
 except Exception:
     st.sidebar.markdown("### Portfolio Dashboard")
