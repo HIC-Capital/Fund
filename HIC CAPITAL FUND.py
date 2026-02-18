@@ -618,12 +618,12 @@ if st.sidebar.button("Transactions", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 
-if st.sidebar.button("📱 TMT",             use_container_width=True): st.session_state.main_page = "TMT Sector"
-if st.sidebar.button("🏦 FIG",             use_container_width=True): st.session_state.main_page = "FIG Sector"
-if st.sidebar.button("🏭 Industrials",     use_container_width=True): st.session_state.main_page = "Industrials Sector"
-if st.sidebar.button("⚡ PUI",             use_container_width=True): st.session_state.main_page = "PUI Sector"
-if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.session_state.main_page = "Consumer Goods Sector"
-if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "Healthcare Sector"
+if st.sidebar.button("📱 TMT",             use_container_width=True): st.session_state.main_page = "📱 TMT Sector"
+if st.sidebar.button("🏦 FIG",             use_container_width=True): st.session_state.main_page = "🏦 FIG Sector"
+if st.sidebar.button("🏭 Industrials",     use_container_width=True): st.session_state.main_page = "🏭 Industrials Sector"
+if st.sidebar.button("⚡ PUI",             use_container_width=True): st.session_state.main_page = "⚡ PUI Sector"
+if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.session_state.main_page = "🛒 Consumer Goods Sector"
+if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "🏥 Healthcare Sector"
 
 main_page = st.session_state.main_page
 
