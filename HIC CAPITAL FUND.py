@@ -579,10 +579,6 @@ st.markdown("""
         color: #0F1D64; font-size: 16px; font-weight: 500;
         transition: all 0.3s ease;
     }
-    div.stButton > button::first-line {
-        font-weight: 700;
-        font-size: 18px;
-    }
     div.stButton > button:hover {
         background-color: #0F1D64; color: white; border-color: #0F1D64;
         transform: translateY(-2px); box-shadow: 0 4px 12px rgba(15,29,100,0.3);
@@ -757,7 +753,7 @@ elif main_page == "Home":
     if "home_tab" not in st.session_state:
         st.session_state.home_tab = "Generic Summary"
 
-    st.markdown("### **Select Analysis Type**")
+    st.markdown("### Select Analysis Type")
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Generic Summary\n\nKey metrics, performance vs MSCI World, portfolio treemap",
@@ -1327,7 +1323,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_s.update_layout(height=400)
                 st.plotly_chart(fig_s, use_container_width=True)
             with c2:
-                st.markdown("### **Sector Breakdown**")
+                st.markdown("### Sector Breakdown")
                 for _, r in sec_data.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Sector"], f"{r['Weight (%)']:.1f}%")
 
@@ -1347,13 +1343,13 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_map.update_layout(height=450, margin=dict(l=0,r=0,t=40,b=0))
                 st.plotly_chart(fig_map, use_container_width=True)
             with c2:
-                st.markdown("### **Regional Allocation**")
+                st.markdown("### Regional Allocation")
                 reg_alloc = df_an.groupby("region")["weight"].sum().reset_index()
                 reg_alloc.columns = ["Region","Weight (%)"]
                 for _, r in reg_alloc.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Region"], f"{r['Weight (%)']:.1f}%")
                 st.markdown("---")
-                st.markdown("### **Top Countries**")
+                st.markdown("### Top Countries")
                 st.dataframe(cnt_alloc[["Country","Weight (%)"]].sort_values("Weight (%)", ascending=False)
                              .style.format({"Weight (%)":"{:.1f}%"}), use_container_width=True, hide_index=True)
 
@@ -1397,7 +1393,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 st.metric("HHI Index (equity only)", f"{hhi:.0f}")
                 st.caption("✅ Well diversified" if hhi < 1000 else "⚠️ Moderately concentrated" if hhi < 1800 else "🔴 Highly concentrated")
 
-            st.markdown("### **Top 10 Holdings by Weight** (% of NAV)")
+            st.markdown("### Top 10 Holdings by Weight (% of NAV)")
             th = df_sorted[["name","sector","country","currency","value_usd","weight"]].head(10).copy()
             th["value_usd"] = th["value_usd"].apply(lambda x: f"${x:,.0f}")
             th["weight"]    = th["weight"].apply(lambda x: f"{x:.2f}%")
@@ -1584,7 +1580,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 ccy_sel = portfolio_holdings[sel]["currency"]
                 c1, c2  = st.columns(2)
                 with c1:
-                    st.markdown(f"### **Input Parameters** ({ccy_sel})")
+                    st.subheader(f"Input Parameters ({ccy_sel})")
                     try:
                         cf = yf.Ticker(sel).cashflow
                         fcf_default = int(abs(cf.loc["Free Cash Flow"].iloc[0])) if not cf.empty and "Free Cash Flow" in cf.index else 1_000_000_000
@@ -1600,7 +1596,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     shares = st.number_input("Shares Outstanding", 1_000_000, value=so, step=1_000_000)
 
                 with c2:
-                    st.markdown(f"### **DCF Calculation** ({ccy_sel})")
+                    st.subheader(f"DCF Calculation ({ccy_sel})")
                     pf = [fcf_in * (1 + gr / 100) ** y for y in range(1, py + 1)]
                     pv = [pf[i] / (1 + wacc_ / 100) ** (i + 1) for i in range(py)]
                     tv = pf[-1] * (1 + tg / 100) / (wacc_ / 100 - tg / 100)
@@ -1647,7 +1643,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
         if "sector_tab" not in st.session_state:
             st.session_state.sector_tab = "Performance Analysis"
 
-        st.markdown("### **Select Analysis Type**")
+        st.markdown("### Select Analysis Type")
         c1, c2, c3 = st.columns(3)
         with c1:
             if st.button("Performance Analysis", key=f"perf_{sector_name}", use_container_width=True):
@@ -1948,7 +1944,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                 cinfo      = sector_holdings[sel_ticker]
                 ccy        = cinfo["currency"]
 
-                st.markdown(f"### **{sel_name}** ({sel_ticker}) — Native currency: {ccy}")
+                st.subheader(f"{sel_name} ({sel_ticker}) — Native currency: {ccy}")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Sector",        cinfo["sector"])
                 c2.metric("Currency",      ccy)
