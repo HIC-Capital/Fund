@@ -193,7 +193,6 @@ def load_data():
 
     return tx, info_df
 
-
 def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
     """
     Compute current net positions from  history.
@@ -257,9 +256,7 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
             "CF_5":           safe_str(row.get("cf_5", "")),
             "_s":  grp.reset_index(drop=True),
         }
-
     return portfolio
-
 
 def _vwap_purchase_price(ticker: str, buys: pd.DataFrame) -> float:
     """
@@ -381,8 +378,6 @@ def get_fx_rate_for_date(currency: str, date, fx_data) -> float:
     except Exception:
         return FALLBACK_FX_TO_CHF.get(currency, 1.0)
 
-
-
 # =============================================================================
 # PAGE CONFIG & CUSTOM CSS
 # =============================================================================
@@ -421,7 +416,6 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
-
 # =============================================================================
 # SIDEBAR
 # =============================================================================
@@ -452,7 +446,6 @@ if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.sessi
 if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "Healthcare Sector"
 
 main_page = st.session_state.main_page
-
 # =============================================================================
 # TRANSACTION HISTORY PAGE
 # =============================================================================
@@ -623,7 +616,6 @@ if main_page == "Transactions":
         height=520, template="plotly_white",
     )
     st.plotly_chart(fig, use_container_width=True)
-
 # =============================================================================
 # HOME PAGE
 # =============================================================================
@@ -650,7 +642,6 @@ elif main_page == "Home":
 
     st.markdown("---")
     home_tab = st.session_state.home_tab
-
     # -------------------------------------------------------------------------
     # HOME - Generic Summary
     # -------------------------------------------------------------------------
@@ -767,7 +758,6 @@ elif main_page == "Home":
 """)
 
                     st.markdown("---")
-
                     # =========================================================
                     # CASH-AWARE PORTFOLIO VALUATION — everything in USD
                     # =========================================================
@@ -776,7 +766,6 @@ elif main_page == "Home":
                     # Each Sell → cash increases by (shares × exec_price_in_USD)
                     # Daily total NAV = cash_usd + Σ(shares × price × fx_to_usd)
                     # =========================================================
-
                     FUND_SIZE_USD = 1_000_000.0   # initial capital
 
                     # ── Helper: get FX rate to USD (not CHF) ─────────────────
@@ -958,7 +947,6 @@ MSCI World **{msci_ret_total:+.2f}%** |
 Alpha **{outperf:+.2f}%** | 
 Cash drag **{cash_pct:.1f}%** of NAV
 """)
-
                     # ── Treemap (USD, includes cash) ───────────────────────────
                     st.subheader("🗺️ Portfolio Composition Treemap")
                     treemap_data = []
@@ -1032,7 +1020,6 @@ Cash drag **{cash_pct:.1f}%** of NAV
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
                     import traceback; st.code(traceback.format_exc())
-
     # -------------------------------------------------------------------------
     # HOME - Portfolio Structure Analysis
     # -------------------------------------------------------------------------
@@ -1121,7 +1108,6 @@ Cash drag **{cash_pct:.1f}%** of NAV
 
         with st.spinner("Fetching HQ countries from yfinance…"):
             country_mapping = fetch_hq_countries(tuple(sorted(portfolio_holdings.keys())))
-
         try:
             with st.spinner("Loading portfolio structure…"):
                 ex_rates_cur = {}
@@ -1277,7 +1263,6 @@ Cash drag **{cash_pct:.1f}%** of NAV
         except Exception as e:
             st.error(f"An error occurred: {e}")
             import traceback; st.code(traceback.format_exc())
-
     # -------------------------------------------------------------------------
     # HOME - Forecast
     # -------------------------------------------------------------------------
@@ -1450,7 +1435,6 @@ Cash drag **{cash_pct:.1f}%** of NAV
                     if ud > 20:      st.success(f"💡 **Undervalued** by {ud:.1f}%")
                     elif ud < -20:   st.error(f"💡 **Overvalued** by {abs(ud):.1f}%")
                     else:            st.info("💡 **Fairly valued** (within ±20%)")
-
 # =============================================================================
 # SECTOR PAGES
 # =============================================================================
@@ -1964,37 +1948,6 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         except Exception as e:
                             st.error(f"Error: {e}")
                             import traceback; st.code(traceback.format_exc())
-
-# =============================================================================
-# ADDING TOOL
-# =============================================================================
-elif main_page == "Adding Tool":
-    st.title("🔧 Portfolio Addition Simulator")
-    st.markdown("""
-### This tool will allow you to:
-
-**Stock Addition Simulation:**
-- Input a stock ticker to analyze
-- Specify allocation amount or percentage
-- Select position size relative to current portfolio
-
-**Impact Analysis:**
-- Portfolio Composition Changes (sector, geo, market cap)
-- Performance Impact (historical sim, expected return, Sharpe)
-- Risk Metrics Changes (Beta, volatility, correlation, diversification)
-- Financial Ratios Impact (P/E, P/B, profitability, debt)
-
-**Comparison View:** Side-by-side before/after metrics with visual charts.
-""")
-    st.info("🛠️ Stock addition simulation tool coming soon.")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.text_input("Enter Stock Ticker", placeholder="e.g., AAPL, MSFT, NESN.SW")
-        st.number_input("Allocation Amount (CHF)", 0, value=10000, step=1000)
-    with c2:
-        st.selectbox("Allocation Method", ["Fixed Amount","Percentage of Portfolio","Equal Weight"])
-        st.button("Run Simulation", type="primary", disabled=True)
-
 # =============================================================================
 # FOOTER
 # =============================================================================
