@@ -7,34 +7,15 @@ import yfinance as yf
 
 # =============================================================================
 # LOAD TRANSACTION HISTORY & STATIC INFO FROM EXCEL
-# Expected sheets:
-#   "Transactions"  – columns: Date | Ticker | Action | Shares
-#                    (Ticker is already in Yahoo Finance format — no mapping needed)
-#   "Holdings_Info" – columns: Ticker | Name | Target_price | Currency |
-#                              Sector | thesis | WACC | CF_1..CF_5
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    """
-    Reads a single Excel sheet that contains BOTH transaction rows AND per-ticker
-    static info columns side-by-side.
-
-    Required columns (transaction data — one row per trade):
-        Date | Ticker | Action | Shares
-
-    Optional extra columns (static info — only the first row per ticker is used):
-        Name | Target_price | Currency | Sector | thesis | WACC | CF_1..CF_5
-
-    If the static-info columns are absent, sensible defaults are used so the
-    dashboard still loads; just fill them in to unlock all features.
-    """
     EXCEL_PATH = "portfolio_holdings.xlsx"
     xl         = pd.ExcelFile(EXCEL_PATH)
     sheet_names = xl.sheet_names
     print(f"Sheets found in Excel: {sheet_names}")
 
-    # ── Read the sheet that contains Buy/Sell data ────────────────────────────
     raw = None
     used_sheet = None
     for sname in sheet_names:
@@ -45,32 +26,26 @@ def load_data():
             if any(v in ["buy", "sell"] for v in vals):
                 raw = candidate
                 used_sheet = sname
-                print(f"Found  data in sheet: '{sname}'")
+                print(f"Found data in sheet: '{sname}'")
                 break
         if raw is not None:
             break
 
     if raw is None:
-        raise ValueError(
-            f"Could not find any sheet with Buy/Sell data. "
-            f"Sheets available: {sheet_names}"
-        )
+        raise ValueError(f"Could not find any sheet with Buy/Sell data. Sheets available: {sheet_names}")
 
     raw.columns = [str(c).strip() for c in raw.columns]
     col_lower   = {c.lower(): c for c in raw.columns}
 
-    # ── Identify the four core  columns ────────────────────────────
-    date_col   = next((col_lower[k] for k in ["date", "trade date", "tradedate"]           if k in col_lower), raw.columns[0])
-    ticker_col = next((col_lower[k] for k in ["ticker", "security", "symbol", "stock"]     if k in col_lower), raw.columns[1])
-    action_col = next((col_lower[k] for k in ["action", "type", "side", "buy/sell"]        if k in col_lower), raw.columns[2])
+    date_col   = next((col_lower[k] for k in ["date", "trade date", "tradedate"]              if k in col_lower), raw.columns[0])
+    ticker_col = next((col_lower[k] for k in ["ticker", "security", "symbol", "stock"]        if k in col_lower), raw.columns[1])
+    action_col = next((col_lower[k] for k in ["action", "type", "side", "buy/sell"]           if k in col_lower), raw.columns[2])
     qty_col    = next((col_lower[k] for k in ["shares", "quantity", "qty", "units", "volume"] if k in col_lower), raw.columns[3])
 
     print(f"   columns detected → date='{date_col}' ticker='{ticker_col}' action='{action_col}' qty='{qty_col}'")
 
-    # ── Build clean s DataFrame ────────────────────────────────────
     tx = raw[[date_col, ticker_col, action_col, qty_col]].copy()
     tx.columns = ["Date", "Ticker", "Action", "Quantity"]
-
     tx = tx.dropna(subset=["Date", "Ticker", "Action", "Quantity"])
     tx["Date"]     = pd.to_datetime(tx["Date"], errors="coerce")
     tx             = tx.dropna(subset=["Date"])
@@ -81,21 +56,16 @@ def load_data():
         errors="coerce"
     ).fillna(0).astype(int)
     tx = tx[tx["Quantity"] > 0]
-    tx["YF_Ticker"] = tx["Ticker"]   # already in Yahoo Finance format
+    tx["YF_Ticker"] = tx["Ticker"]
 
-    # ── Build static info DataFrame (one row per unique ticker) ───────────────
-    # Identify which columns are the static-info extras (anything beyond the 4 core ones)
     core_cols = {date_col, ticker_col, action_col, qty_col}
     info_extra_cols = [c for c in raw.columns if c not in core_cols]
-
-    # Normalise column names for flexible lookup
     info_col_map = {c.lower(): c for c in info_extra_cols}
 
-    # For each unique ticker take the FIRST non-null row that has static data
     unique_tickers = tx["Ticker"].unique()
 
     INFO_DEFAULTS = {
-        "name":         lambda t: t,          # fallback: use ticker as name
+        "name":         lambda t: t,
         "target_price": lambda t: 0.0,
         "currency":     lambda t: "USD",
         "sector":       lambda t: "Unknown",
@@ -108,7 +78,6 @@ def load_data():
         "cf_5":         lambda t: "",
     }
 
-    # Map flexible column name → standard key
     FIELD_CANDIDATES = {
         "name":         ["name", "company", "company name"],
         "target_price": ["target_price", "target price", "targetprice", "target", "tp", "price target", "pt", "target px", "targetpx"],
@@ -124,24 +93,20 @@ def load_data():
     }
 
     def resolve_col(field):
-        """Return the actual column name from the sheet for a given standard field, or None."""
         for candidate in FIELD_CANDIDATES[field]:
             if candidate in info_col_map:
                 return info_col_map[candidate]
         return None
 
-    # ── Fetch currency from yfinance for each unique ticker ──────────────────
     def fetch_currency_from_yf(ticker):
-        """Query yfinance for the trading currency of a ticker."""
         try:
             info = yf.Ticker(ticker).info
-            # yfinance exposes 'currency' directly
             ccy = info.get("currency", None)
             if ccy and isinstance(ccy, str) and len(ccy) == 3:
                 return ccy.upper()
         except Exception:
             pass
-        return None   # caller will use "USD" as final fallback
+        return None
 
     print("Fetching currencies from yfinance…")
     yf_currencies = {}
@@ -150,41 +115,32 @@ def load_data():
         yf_currencies[ticker] = ccy if ccy else "USD"
         print(f"  {ticker}: {yf_currencies[ticker]}")
 
-    # Override the currency default to use the yfinance-fetched value
     INFO_DEFAULTS["currency"] = lambda t: yf_currencies.get(t, "USD")
 
-    # Print exactly which static columns were detected
     detected = {field: resolve_col(field) for field in FIELD_CANDIDATES}
     print(f"\nStatic columns detected in Excel: {detected}")
 
     info_records = {}
     for ticker in unique_tickers:
-        # All rows for this ticker (Buy + Sell) — search all for static values
         ticker_rows = raw[raw[ticker_col].astype(str).str.strip() == ticker]
         rec = {}
         for field, default_fn in INFO_DEFAULTS.items():
             col = resolve_col(field)
-
-            # Currency: always use yfinance value (most reliable)
             if field == "currency":
                 rec[field] = yf_currencies.get(ticker, "USD")
                 continue
-
             if col is not None:
-                # Search ALL rows for this ticker for a non-null, non-empty value
                 vals = ticker_rows[col].dropna()
                 vals = vals[vals.astype(str).str.strip() != ""]
                 rec[field] = vals.iloc[0] if len(vals) > 0 else default_fn(ticker)
             else:
                 rec[field] = default_fn(ticker)
-
         info_records[ticker] = rec
 
     info_df = pd.DataFrame.from_dict(info_records, orient="index")
     info_df.index.name = "Ticker"
 
-    # Print a summary so you can verify what was read
-    print(f"\nSheet: '{used_sheet}' | s: {len(tx)} rows | Unique tickers: {len(info_df)}")
+    print(f"\nSheet: '{used_sheet}' | Transactions: {len(tx)} rows | Unique tickers: {len(info_df)}")
     print(f"{'Ticker':<20} {'Currency':<8} {'Sector':<20} {'Thesis':<30}")
     print("-" * 80)
     for t in sorted(info_df.index):
@@ -193,14 +149,8 @@ def load_data():
 
     return tx, info_df
 
-def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
-    """
-    Compute current net positions from  history.
 
-    info_df is indexed by ticker and has lowercase columns:
-        name, target_price, currency, sector, thesis, wacc, cf_1..cf_5
-    (built by load_data from the single Excel sheet)
-    """
+def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
     portfolio = {}
 
     for yf_ticker, grp in tx.groupby("YF_Ticker"):
@@ -209,17 +159,13 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
 
         buys  = grp[grp["Action"] == "Buy"]
         sells = grp[grp["Action"] == "Sell"]
-
         net_qty = int(buys["Quantity"].sum()) - int(sells["Quantity"].sum())
         if net_qty <= 0:
-            continue   # position fully closed — skip
+            continue
 
-        # ── Look up static info row for this ticker ───────────────────────────
         if yf_ticker in info_df.index:
             row = info_df.loc[yf_ticker]
         else:
-            # Should not happen since info_df is built from the same tx data,
-            # but guard against edge cases gracefully
             st.warning(f"⚠️ No static info for **{yf_ticker}** – using defaults.")
             row = pd.Series({
                 "name": yf_ticker, "target_price": 0.0, "currency": "USD",
@@ -227,11 +173,10 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
                 "cf_1": "", "cf_2": "", "cf_3": "", "cf_4": "", "cf_5": "",
             })
 
-        # ── First buy date & VWAP purchase price ─────────────────────────────
         first_buy_date = buys["Date"].min()
+        # purchase_price is stored in NATIVE currency (e.g. INR for Indian stocks)
         purchase_price = _vwap_purchase_price(yf_ticker, buys)
 
-        # ── Safe value extraction helpers ─────────────────────────────────────
         def safe_float(val, default=0.0):
             try:    return float(val)
             except: return default
@@ -243,9 +188,11 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
             "quantity":       net_qty,
             "name":           safe_str(row.get("name", yf_ticker), yf_ticker),
             "Target_price":   safe_float(row.get("target_price", 0.0)),
+            # native currency of the stock (e.g. "INR" for Bharti Airtel)
             "currency":       safe_str(row.get("currency", "USD"), "USD"),
             "sector":         safe_str(row.get("sector", "Unknown"), "Unknown"),
             "purchase_date":  first_buy_date.strftime("%Y-%m-%d"),
+            # stored in NATIVE currency — always convert before mixing with USD values
             "purchase_price": purchase_price,
             "thesis":         safe_str(row.get("thesis", "")),
             "WACC":           safe_str(row.get("wacc", "")),
@@ -254,33 +201,26 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
             "CF_3":           safe_str(row.get("cf_3", "")),
             "CF_4":           safe_str(row.get("cf_4", "")),
             "CF_5":           safe_str(row.get("cf_5", "")),
-            "_s":  grp.reset_index(drop=True),
+            "_transactions":  grp.reset_index(drop=True),
         }
     return portfolio
 
+
 def _vwap_purchase_price(ticker: str, buys: pd.DataFrame) -> float:
-    """
-    Weighted-average purchase price across all buy s.
-    Fetches the closing price on each buy date from yfinance.
-    Returns 0.0 on failure.
-    """
+    """Weighted-average purchase price in NATIVE currency."""
     total_cost = 0.0
     total_qty  = 0
-
     for _, row in buys.iterrows():
-        date_str = row["Date"].strftime("%Y-%m-%d")
-        qty      = int(row["Quantity"])
-        price    = _fetch_close_on_date(ticker, row["Date"])
+        qty   = int(row["Quantity"])
+        price = _fetch_close_on_date(ticker, row["Date"])
         if price is None:
             price = 0.0
         total_cost += price * qty
         total_qty  += qty
-
     return (total_cost / total_qty) if total_qty > 0 else 0.0
 
 
 def _fetch_close_on_date(ticker: str, date: pd.Timestamp) -> float | None:
-    """Return the closing price for *ticker* on *date* (or last available day)."""
     try:
         start = date - pd.Timedelta(days=7)
         end   = date + pd.Timedelta(days=1)
@@ -296,18 +236,62 @@ def _fetch_close_on_date(ticker: str, date: pd.Timestamp) -> float | None:
 
 
 # ── Load & build ──────────────────────────────────────────────────────────────
-print("Loading  history…")
+print("Loading transaction history…")
 _tx, _info_df = load_data()
 
-print("Building portfolio from s…")
+print("Building portfolio from transactions…")
 portfolio_holdings = build_portfolio(_tx, _info_df)
 
 print(f"Active positions: {list(portfolio_holdings.keys())}")
 
-# Currency pairs for conversion to CHF (base currency)
-# All known currency → CHF pairs. "CHF": None means no conversion needed.
-# Any currency NOT listed here will be fetched dynamically from yfinance at runtime.
-currency_pairs = {
+# =============================================================================
+# FX UTILITIES  (everything converts TO USD as the fund's base currency)
+# =============================================================================
+
+# Known native→USD yfinance pairs.  Missing ones are constructed dynamically.
+NATIVE_TO_USD_PAIRS = {
+    "USD": None,        # no conversion needed
+    "EUR": "EURUSD=X",
+    "GBP": "GBPUSD=X",
+    "JPY": "JPYUSD=X",
+    "CHF": "CHFUSD=X",
+    "CAD": "CADUSD=X",
+    "AUD": "AUDUSD=X",
+    "HKD": "HKDUSD=X",
+    "INR": "INRUSD=X",
+    "CNY": "CNYUSD=X",
+    "SEK": "SEKUSD=X",
+    "NOK": "NOKUSD=X",
+    "DKK": "DKKUSD=X",
+    "SGD": "SGDUSD=X",
+    "KRW": "KRWUSD=X",
+    "BRL": "BRLUSD=X",
+    "MXN": "MXNUSD=X",
+}
+
+# Fallback spot rates → USD (used when yfinance download fails)
+FALLBACK_FX_TO_USD = {
+    "USD": 1.0000,
+    "EUR": 1.0850,
+    "GBP": 1.2700,
+    "JPY": 0.0067,
+    "CHF": 1.1260,
+    "CAD": 0.7350,
+    "AUD": 0.6500,
+    "HKD": 0.1280,
+    "INR": 0.0120,
+    "CNY": 0.1380,
+    "SEK": 0.0940,
+    "NOK": 0.0940,
+    "DKK": 0.1440,
+    "SGD": 0.7450,
+    "KRW": 0.00073,
+    "BRL": 0.1900,
+    "MXN": 0.0580,
+}
+
+# Also keep CHF pairs for the "Portfolio Structure" page which shows CHF totals
+NATIVE_TO_CHF_PAIRS = {
     "USD": "USDCHF=X",
     "EUR": "EURCHF=X",
     "INR": "INRCHF=X",
@@ -324,59 +308,81 @@ currency_pairs = {
     "KRW": "KRWCHF=X",
     "BRL": "BRLCHF=X",
     "MXN": "MXNCHF=X",
-    "CHF": None,   # base currency — no conversion needed
+    "CHF": None,
 }
-
-def get_fx_pair(currency: str) -> str | None:
-    """Return the yfinance FX ticker for currency → CHF, or None if CHF."""
-    if currency == "CHF":
-        return None
-    if currency in currency_pairs:
-        return currency_pairs[currency]
-    # Dynamically construct pair for any unlisted currency
-    return f"{currency}CHF=X"
-
-# Runtime cache for FX rate data (avoids re-downloading per page)
-_fx_data_cache: dict = {}
-
-def get_fx_data(currency: str, start, end) -> object:
-    """Download and cache FX data for a currency over a date range."""
-    pair = get_fx_pair(currency)
-    if pair is None:
-        return None   # CHF — rate is always 1.0
-    cache_key = (pair, str(start), str(end))
-    if cache_key not in _fx_data_cache:
-        try:
-            _fx_data_cache[cache_key] = yf.download(pair, start=start, end=end, progress=False)
-        except Exception:
-            _fx_data_cache[cache_key] = pd.DataFrame()
-    return _fx_data_cache[cache_key]
-
-# Fallback spot rates to CHF (used when yfinance download fails)
 FALLBACK_FX_TO_CHF = {
     "USD": 0.888, "EUR": 0.940, "INR": 0.0104, "HKD": 0.114,
     "AUD": 0.570, "CAD": 0.650, "GBP": 1.120,  "JPY": 0.0059,
     "CNY": 0.122, "SGD": 0.660, "SEK": 0.083,  "NOK": 0.083,
-    "DKK": 0.126, "KRW": 0.00065,
+    "DKK": 0.126, "KRW": 0.00065, "CHF": 1.0,
 }
-def get_fx_rate_for_date(currency: str, date, fx_data) -> float:
+
+
+def _get_yf_pair(currency: str, target: str = "USD") -> str | None:
+    """Return the yfinance pair string for currency → target, or None if same."""
+    if currency == target:
+        return None
+    if target == "USD":
+        return NATIVE_TO_USD_PAIRS.get(currency, f"{currency}USD=X")
+    if target == "CHF":
+        return NATIVE_TO_CHF_PAIRS.get(currency, f"{currency}CHF=X")
+    return f"{currency}{target}=X"
+
+
+# Runtime caches
+_fx_series_cache: dict = {}   # (pair, start, end) → pd.DataFrame
+
+
+def _fetch_fx_series(currency: str, start, end, target: str = "USD") -> pd.DataFrame | None:
+    """Download and cache a full FX time-series for currency → target."""
+    pair = _get_yf_pair(currency, target)
+    if pair is None:
+        return None   # same currency, rate = 1.0
+
+    key = (pair, str(start), str(end))
+    if key not in _fx_series_cache:
+        try:
+            data = yf.download(pair, start=start, end=end, progress=False)
+            _fx_series_cache[key] = data if not data.empty else pd.DataFrame()
+        except Exception:
+            _fx_series_cache[key] = pd.DataFrame()
+    return _fx_series_cache[key]
+
+
+def _fx_rate_on_date(currency: str, date, fx_series, target: str = "USD") -> float:
     """
-    Get the CHF conversion rate for *currency* on *date* using pre-fetched fx_data.
-    fx_data can be a DataFrame (from yf.download) or None (for CHF).
-    Falls back to FALLBACK_FX_TO_CHF if data is unavailable.
+    Return the conversion rate for 1 unit of *currency* → *target* on *date*.
+    Uses pre-fetched fx_series; falls back to hardcoded fallbacks.
     """
-    if currency == "CHF":
+    if currency == target:
         return 1.0
-    if fx_data is None or (hasattr(fx_data, "empty") and fx_data.empty):
-        return FALLBACK_FX_TO_CHF.get(currency, 1.0)
+    fallbacks = FALLBACK_FX_TO_USD if target == "USD" else FALLBACK_FX_TO_CHF
+    if fx_series is None or (hasattr(fx_series, "empty") and fx_series.empty):
+        return fallbacks.get(currency, 1.0)
     try:
-        close = fx_data["Close"].iloc[:, 0] if isinstance(fx_data["Close"], pd.DataFrame) else fx_data["Close"]
+        close = fx_series["Close"].iloc[:, 0] if isinstance(fx_series["Close"], pd.DataFrame) else fx_series["Close"]
         avail = close.index[close.index <= date]
-        if len(avail) > 0:
-            return float(close.loc[avail[-1]])
-        return float(close.iloc[0])
+        return float(close.loc[avail[-1]]) if len(avail) > 0 else float(close.iloc[0])
     except Exception:
-        return FALLBACK_FX_TO_CHF.get(currency, 1.0)
+        return fallbacks.get(currency, 1.0)
+
+
+def _spot_fx(currency: str, target: str = "USD") -> float:
+    """Fetch the latest spot rate for currency → target (single value)."""
+    if currency == target:
+        return 1.0
+    pair = _get_yf_pair(currency, target)
+    if pair is None:
+        return 1.0
+    try:
+        d = yf.Ticker(pair).history(period="2d")
+        if not d.empty:
+            return float(d["Close"].iloc[-1])
+    except Exception:
+        pass
+    fallbacks = FALLBACK_FX_TO_USD if target == "USD" else FALLBACK_FX_TO_CHF
+    return fallbacks.get(currency, 1.0)
+
 
 # =============================================================================
 # PAGE CONFIG & CUSTOM CSS
@@ -416,6 +422,7 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
 # =============================================================================
 # SIDEBAR
 # =============================================================================
@@ -433,8 +440,9 @@ if st.sidebar.button("🏠 Home", use_container_width=True):
 
 if "main_page" not in st.session_state:
     st.session_state.main_page = "Home"
-if st.sidebar.button("📋 transactions",    use_container_width=True): st.session_state.main_page = "Transactions"
-    
+if st.sidebar.button("📋 Transactions", use_container_width=True):
+    st.session_state.main_page = "Transactions"
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 
@@ -446,19 +454,15 @@ if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.sessi
 if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "Healthcare Sector"
 
 main_page = st.session_state.main_page
+
 # =============================================================================
 # TRANSACTION HISTORY PAGE
 # =============================================================================
 if main_page == "Transactions":
     st.title("📋 Transaction History")
 
-    # ── Fetch execution prices for every trade ────────────────────────────────
     @st.cache_data(show_spinner=False)
     def fetch_execution_prices(tx_df: pd.DataFrame) -> pd.Series:
-        """
-        For each row in tx_df, fetch the closing price on the trade date.
-        Returns a Series of prices aligned to tx_df's index.
-        """
         prices = []
         for _, row in tx_df.iterrows():
             ticker = row["Ticker"]
@@ -477,7 +481,6 @@ if main_page == "Transactions":
                 prices.append(None)
         return pd.Series(prices, index=tx_df.index)
 
-    # Show raw log with execution prices
     st.subheader("All Transactions")
 
     with st.spinner("Fetching execution prices from yfinance…"):
@@ -486,7 +489,6 @@ if main_page == "Transactions":
     display_tx = _tx.reset_index(drop=True).copy()
     display_tx["Exec Price"] = exec_prices.values
 
-    # Pull currency per ticker from portfolio_holdings (or info_df fallback)
     def get_ticker_currency(ticker):
         if ticker in portfolio_holdings:
             return portfolio_holdings[ticker]["currency"]
@@ -495,20 +497,12 @@ if main_page == "Transactions":
         return ""
 
     display_tx["Currency"] = display_tx["Ticker"].apply(get_ticker_currency)
-
-    # Gross value = price × shares
     display_tx["Gross Value"] = display_tx.apply(
         lambda r: r["Exec Price"] * r["Quantity"] if pd.notna(r["Exec Price"]) else None, axis=1
     )
-
-    # Format for display
     display_tx["Date"]        = display_tx["Date"].dt.strftime("%Y-%m-%d")
-    display_tx["Exec Price"]  = display_tx["Exec Price"].apply(
-        lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A"
-    )
-    display_tx["Gross Value"] = display_tx["Gross Value"].apply(
-        lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A"
-    )
+    display_tx["Exec Price"]  = display_tx["Exec Price"].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A")
+    display_tx["Gross Value"] = display_tx["Gross Value"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
 
     st.dataframe(
         display_tx[["Date", "Ticker", "Action", "Quantity", "Currency", "Exec Price", "Gross Value"]],
@@ -516,8 +510,6 @@ if main_page == "Transactions":
     )
 
     st.markdown("---")
-
-    # Per-ticker position summary
     st.subheader("Net Position Summary")
     rows = []
     for yf_ticker, grp in _tx.groupby("YF_Ticker"):
@@ -527,63 +519,37 @@ if main_page == "Transactions":
         sold   = int(grp[grp["Action"] == "Sell"]["Quantity"].sum())
         net    = bought - sold
         rows.append({
-            "YF Ticker": yf_ticker,
-            "Bought": bought,
-            "Sold":   sold,
-            "Net Position": net,
-            "Status": "🟢 Open" if net > 0 else "🔴 Closed",
+            "YF Ticker": yf_ticker, "Bought": bought, "Sold": sold,
+            "Net Position": net, "Status": "🟢 Open" if net > 0 else "🔴 Closed",
         })
     summary_df = pd.DataFrame(rows).sort_values("YF Ticker")
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-
-    # Transaction timeline chart — bubble size = gross value, proportional across ALL bubbles
     st.subheader("Transaction Timeline")
 
-    # We need exec prices to compute gross values for bubble sizing
-    # Reuse the already-fetched exec_prices (numeric, before formatting)
     with st.spinner("Computing bubble sizes from trade values…"):
         raw_prices = fetch_execution_prices(_tx.reset_index(drop=True))
 
     bubble_tx = _tx.reset_index(drop=True).copy()
     bubble_tx["exec_price"] = raw_prices.values
 
-    # Convert exec price to USD so all bubbles are on the same scale
-    @st.cache_data(show_spinner=False)
-    def get_spot_usd_rate(currency: str) -> float:
-        """Fetch current spot rate currency → USD."""
-        if currency == "USD":
-            return 1.0
-        try:
-            pair = f"{currency}USD=X"
-            d = yf.Ticker(pair).history(period="2d")
-            if not d.empty:
-                return float(d["Close"].iloc[-1])
-        except Exception:
-            pass
-        # Fallback: invert CHF rates
-        chf_rate = FALLBACK_FX_TO_CHF.get(currency, 1.0)
-        usd_chf  = FALLBACK_FX_TO_CHF.get("USD", 0.888)
-        return chf_rate / usd_chf if usd_chf else 1.0
-
-    spot_usd = {t: get_spot_usd_rate(
-        portfolio_holdings.get(t, {}).get("currency", "USD")
-    ) for t in bubble_tx["Ticker"].unique()}
+    # Convert each trade's native price → USD for comparable bubble sizing
+    spot_usd_rates = {
+        t: _spot_fx(portfolio_holdings.get(t, {}).get("currency", "USD"), "USD")
+        for t in bubble_tx["Ticker"].unique()
+    }
 
     bubble_tx["exec_price_usd"] = bubble_tx.apply(
-        lambda r: r["exec_price"] * spot_usd.get(r["Ticker"], 1.0)
+        lambda r: r["exec_price"] * spot_usd_rates.get(r["Ticker"], 1.0)
         if pd.notna(r["exec_price"]) else None, axis=1
     )
     bubble_tx["gross_value"] = bubble_tx.apply(
-        lambda r: r["exec_price_usd"] * r["Quantity"]
-        if pd.notna(r["exec_price_usd"]) else r["Quantity"],
+        lambda r: r["exec_price_usd"] * r["Quantity"] if pd.notna(r["exec_price_usd"]) else r["Quantity"],
         axis=1
     )
 
-    # Global max across ALL rows (both Buy and Sell) so bubbles are comparable
     global_max_val = bubble_tx["gross_value"].max()
-    # Scale: min bubble = 8, max bubble = 50
     bubble_tx["bubble_size"] = (bubble_tx["gross_value"] / global_max_val) * 42 + 8
 
     fig = go.Figure()
@@ -591,31 +557,22 @@ if main_page == "Transactions":
     for action in ["Buy", "Sell"]:
         subset = bubble_tx[bubble_tx["Action"] == action]
         fig.add_trace(go.Scatter(
-            x=subset["Date"],
-            y=subset["Ticker"],
+            x=subset["Date"], y=subset["Ticker"],
             mode="markers",
-            marker=dict(
-                color=colors[action],
-                size=subset["bubble_size"],
-                opacity=0.8,
-                sizemode="diameter",
-            ),
+            marker=dict(color=colors[action], size=subset["bubble_size"], opacity=0.8, sizemode="diameter"),
             name=action,
             hovertemplate=(
-                "<b>%{y}</b><br>"
-                "Date: %{x}<br>"
-                "Qty: %{customdata[0]:,}<br>"
-                "Value (USD): $%{customdata[1]:,.0f}"
-                "<extra></extra>"
+                "<b>%{y}</b><br>Date: %{x}<br>"
+                "Qty: %{customdata[0]:,}<br>Value (USD): $%{customdata[1]:,.0f}<extra></extra>"
             ),
-            customdata=subset[["Quantity","gross_value"]].values,
+            customdata=subset[["Quantity", "gross_value"]].values,
         ))
     fig.update_layout(
-        title="Buy & Sell Events (bubble size = trade value in USD, proportional across all trades)",
-        xaxis_title="Date", yaxis_title="Ticker",
-        height=520, template="plotly_white",
+        title="Buy & Sell Events (bubble size = trade value in USD, all currencies converted)",
+        xaxis_title="Date", yaxis_title="Ticker", height=520, template="plotly_white",
     )
     st.plotly_chart(fig, use_container_width=True)
+
 # =============================================================================
 # HOME PAGE
 # =============================================================================
@@ -642,9 +599,10 @@ elif main_page == "Home":
 
     st.markdown("---")
     home_tab = st.session_state.home_tab
-    # -------------------------------------------------------------------------
+
+    # =========================================================================
     # HOME - Generic Summary
-    # -------------------------------------------------------------------------
+    # =========================================================================
     if home_tab == "Generic Summary":
         st.header("📈 Generic Summary")
 
@@ -661,76 +619,60 @@ elif main_page == "Home":
                 st.error("Start date must be before end date.")
             else:
                 try:
-                    with st.spinner("Fetching market data and exchange rates…"):
+                    with st.spinner("Fetching market data and FX rates…"):
                         msci_world = yf.download("URTH", start=start_date, end=end_date, progress=False)
+                        msci_close = (msci_world["Close"].iloc[:, 0]
+                                      if isinstance(msci_world["Close"], pd.DataFrame)
+                                      else msci_world["Close"])
 
-                        # Collect all currencies actually used in the portfolio
+                        # Pre-fetch native→USD FX series for every currency used
                         used_currencies = {info["currency"] for info in portfolio_holdings.values()}
-                        exchange_rates = {}
-                        for currency in used_currencies:
-                            if currency == "CHF":
-                                exchange_rates[currency] = None
-                            else:
-                                pair = get_fx_pair(currency)
-                                if pair:
-                                    try:
-                                        exchange_rates[currency] = yf.download(pair, start=start_date, end=end_date, progress=False)
-                                    except Exception:
-                                        exchange_rates[currency] = pd.DataFrame()
-                                else:
-                                    exchange_rates[currency] = None
+                        fx_series_usd: dict = {}      # currency → pd.DataFrame (native→USD)
+                        for ccy in used_currencies:
+                            fx_series_usd[ccy] = _fetch_fx_series(ccy, start_date, end_date, "USD")
 
-                        portfolio_data  = {}
-                        initial_prices  = {}
-                        current_prices_ = {}
-
-                        for ticker, info in portfolio_holdings.items():
+                        # Download price history for each holding
+                        portfolio_data: dict = {}
+                        for ticker in portfolio_holdings:
                             data = yf.download(ticker, start=start_date, end=end_date, progress=False)
                             if not data.empty:
                                 portfolio_data[ticker] = data
-                                close = data["Close"].iloc[:, 0] if isinstance(data["Close"], pd.DataFrame) else data["Close"]
-                                initial_prices[ticker]  = float(close.iloc[0])
-                                current_prices_[ticker] = float(close.iloc[-1])
 
-                    def get_fx_rate(currency, date, exchange_rates):
-                        fx_data = exchange_rates.get(currency) if exchange_rates else None
-                        if fx_data is None and currency not in ("CHF",):
-                            # Try dynamic fetch for currencies not pre-downloaded
-                            pair = get_fx_pair(currency)
-                            if pair:
-                                try:
-                                    fx_data = yf.download(pair, start=start_date, end=end_date, progress=False)
-                                    exchange_rates[currency] = fx_data
-                                except Exception:
-                                    pass
-                        return get_fx_rate_for_date(currency, date, fx_data)
+                    # Helper: get closing price for a ticker on/before date (native currency)
+                    def get_price_native(ticker, date, data_dict):
+                        if ticker not in data_dict:
+                            return None
+                        d  = data_dict[ticker]
+                        cl = d["Close"].iloc[:, 0] if isinstance(d["Close"], pd.DataFrame) else d["Close"]
+                        av = cl.index[cl.index <= date]
+                        return float(cl.loc[av[-1]]) if len(av) > 0 else None
+
+                    # Helper: get native→USD rate on a date
+                    def get_rate_usd(currency, date):
+                        return _fx_rate_on_date(currency, date, fx_series_usd.get(currency), "USD")
 
                     # ── Risk Metrics ──────────────────────────────────────────
                     st.subheader("📊 Portfolio Risk Metrics")
 
-                    with st.spinner("Calculating Sharpe ratio, Alpha, and Beta…"):
-                        all_dates = msci_world.index
+                    with st.spinner("Calculating Sharpe, Alpha & Beta…"):
+                        all_dates = msci_close.index
                         portfolio_values = pd.Series(index=all_dates, dtype=float)
 
                         for date in all_dates:
-                            daily_value = 0
+                            daily_value = 0.0
                             for ticker, info in portfolio_holdings.items():
-                                if ticker in portfolio_data and not portfolio_data[ticker].empty:
-                                    sd = portfolio_data[ticker]
-                                    sc = sd["Close"].iloc[:, 0] if isinstance(sd["Close"], pd.DataFrame) else sd["Close"]
-                                    avail = sc.index[sc.index <= date]
-                                    price = float(sc.loc[avail[-1]]) if len(avail) > 0 else initial_prices[ticker]
-                                    fx    = get_fx_rate(info["currency"], date, exchange_rates)
-                                    daily_value += price * info["quantity"] * fx
+                                price_native = get_price_native(ticker, date, portfolio_data)
+                                if price_native is None:
+                                    continue
+                                # Convert native price → USD
+                                rate = get_rate_usd(info["currency"], date)
+                                daily_value += price_native * info["quantity"] * rate
                             portfolio_values[date] = daily_value
 
                         port_ret = portfolio_values.pct_change().dropna()
-                        msci_close = msci_world["Close"].iloc[:, 0] if isinstance(msci_world["Close"], pd.DataFrame) else msci_world["Close"]
-                        msci_ret  = msci_close.pct_change().dropna()
-
-                        common = port_ret.index.intersection(msci_ret.index)
-                        pr     = port_ret.loc[common]
-                        mr     = msci_ret.loc[common]
+                        msci_ret = msci_close.pct_change().dropna()
+                        common   = port_ret.index.intersection(msci_ret.index)
+                        pr = port_ret.loc[common]; mr = msci_ret.loc[common]
 
                         rf_daily = 0.02 / 252
                         excess   = pr - rf_daily
@@ -740,8 +682,7 @@ elif main_page == "Home":
                         reg_data = pd.DataFrame({"msci": mr, "portfolio": pr}).dropna()
                         if len(reg_data) > 2:
                             slope, intercept, *_ = scipy_stats.linregress(reg_data["msci"], reg_data["portfolio"])
-                            beta        = slope
-                            alpha_annual = (1 + intercept) ** 252 - 1
+                            beta = slope; alpha_annual = (1 + intercept) ** 252 - 1
                         else:
                             beta = alpha_annual = 0.0
 
@@ -758,114 +699,57 @@ elif main_page == "Home":
 """)
 
                     st.markdown("---")
+
                     # =========================================================
-                    # CASH-AWARE PORTFOLIO VALUATION — everything in USD
+                    # CASH-AWARE NAV  — fund base currency = USD
+                    # All stock prices fetched in NATIVE currency, then × rate→USD
+                    # Cash is always in USD
                     # =========================================================
-                    # Fund starts with $1,000,000 USD cash.
-                    # Each Buy  → cash decreases by (shares × exec_price_in_USD)
-                    # Each Sell → cash increases by (shares × exec_price_in_USD)
-                    # Daily total NAV = cash_usd + Σ(shares × price × fx_to_usd)
-                    # =========================================================
-                    FUND_SIZE_USD = 1_000_000.0   # initial capital
+                    FUND_SIZE_USD = 1_000_000.0
 
-                    # ── Helper: get FX rate to USD (not CHF) ─────────────────
-                    # We download XXXUSD=X pairs for the valuation period
-                    usd_fx_cache = {"USD": None}   # USD→USD = 1.0 always
-
-                    def get_usd_pair(currency):
-                        if currency == "USD": return None
-                        return f"{currency}USD=X"
-
-                    def fetch_usd_fx(currency):
-                        if currency in usd_fx_cache:
-                            return usd_fx_cache[currency]
-                        pair = get_usd_pair(currency)
-                        if pair is None:
-                            usd_fx_cache[currency] = None
-                            return None
-                        try:
-                            data = yf.download(pair, start=start_date, end=end_date, progress=False)
-                            usd_fx_cache[currency] = data
-                        except Exception:
-                            usd_fx_cache[currency] = pd.DataFrame()
-                        return usd_fx_cache[currency]
-
-                    def get_fx_to_usd(currency, date):
-                        """Convert 1 unit of *currency* to USD on *date*."""
-                        if currency == "USD":
-                            return 1.0
-                        fx_data = fetch_usd_fx(currency)
-                        if fx_data is None or (hasattr(fx_data, "empty") and fx_data.empty):
-                            return FALLBACK_FX_TO_CHF.get(currency, 1.0) / FALLBACK_FX_TO_CHF.get("USD", 0.888)
-                        try:
-                            close = fx_data["Close"].iloc[:, 0] if isinstance(fx_data["Close"], pd.DataFrame) else fx_data["Close"]
-                            avail = close.index[close.index <= date]
-                            return float(close.loc[avail[-1]]) if len(avail) > 0 else float(close.iloc[0])
-                        except Exception:
-                            return 1.0
-
-                    # Pre-fetch USD FX for all portfolio currencies
-                    with st.spinner("Fetching USD FX rates…"):
-                        for info in portfolio_holdings.values():
-                            fetch_usd_fx(info["currency"])
-
-                    # ── Reconstruct cash balance day-by-day from transactions ─
                     # Sort all transactions chronologically
                     all_tx = _tx.sort_values("Date").reset_index(drop=True)
-
-                    def get_stock_price_on(ticker, date, stock_data_dict):
-                        """Get closing price of ticker on or before date."""
-                        if ticker not in stock_data_dict:
-                            return None
-                        d = stock_data_dict[ticker]
-                        cl = d["Close"].iloc[:,0] if isinstance(d["Close"], pd.DataFrame) else d["Close"]
-                        avail = cl.index[cl.index <= date]
-                        return float(cl.loc[avail[-1]]) if len(avail) > 0 else None
-
-                    dates = msci_close.index
-
-                    # Build daily NAV series
-                    nav_usd          = []
-                    equity_usd_daily = []
-                    cash_usd_daily   = []
-
-                    # Running cash starts at fund size; depleted/replenished by trades
-                    cash_usd = FUND_SIZE_USD
-
-                    # Running share count per ticker (adjusted as trades happen)
-                    live_shares = {ticker: 0 for ticker in portfolio_holdings}
-
-                    # Also track tickers that appear in transactions but may be fully sold
-                    for ticker in all_tx["Ticker"].unique():
-                        if ticker not in live_shares:
-                            live_shares[ticker] = 0
-
-                    # Index transactions by date for fast lookup
-                    tx_by_date = {}
+                    tx_by_date: dict = {}
                     for _, tx_row in all_tx.iterrows():
                         d = tx_row["Date"].normalize()
                         tx_by_date.setdefault(d, []).append(tx_row)
 
+                    dates = msci_close.index
+
+                    nav_usd_list    = []
+                    equity_usd_list = []
+                    cash_usd_list   = []
+
+                    cash_usd   = FUND_SIZE_USD
+                    live_shares: dict = {t: 0 for t in portfolio_holdings}
+                    for t in all_tx["Ticker"].unique():
+                        if t not in live_shares:
+                            live_shares[t] = 0
+
                     for date in dates:
                         date_norm = pd.Timestamp(date).normalize()
 
-                        # Process any transactions that happened ON this date
+                        # Process trades on this date
                         for tx_row in tx_by_date.get(date_norm, []):
-                            ticker  = tx_row["Ticker"]
-                            qty     = int(tx_row["Quantity"])
-                            action  = tx_row["Action"]
-                            # Use closing price on trade date converted to USD
-                            price_native = get_stock_price_on(ticker, date, portfolio_data)
+                            ticker = tx_row["Ticker"]
+                            qty    = int(tx_row["Quantity"])
+                            action = tx_row["Action"]
+
+                            # Price in NATIVE currency on trade date
+                            price_native = get_price_native(ticker, date, portfolio_data)
                             if price_native is None:
-                                price_native = portfolio_holdings.get(ticker, {}).get("purchase_price", 0)
-                            ccy      = portfolio_holdings.get(ticker, {}).get("currency", "USD")
-                            price_usd = price_native * get_fx_to_usd(ccy, date)
+                                # Fallback: use stored purchase_price (also native), convert to USD
+                                price_native = portfolio_holdings.get(ticker, {}).get("purchase_price", 0.0)
+
+                            ccy = portfolio_holdings.get(ticker, {}).get("currency", "USD")
+                            # Convert native → USD
+                            price_usd = price_native * get_rate_usd(ccy, date)
 
                             if action == "Buy":
-                                cash_usd          -= price_usd * qty
+                                cash_usd -= price_usd * qty
                                 live_shares[ticker] = live_shares.get(ticker, 0) + qty
                             elif action == "Sell":
-                                cash_usd          += price_usd * qty
+                                cash_usd += price_usd * qty
                                 live_shares[ticker] = max(0, live_shares.get(ticker, 0) - qty)
 
                         # Value equity positions in USD
@@ -873,51 +757,46 @@ elif main_page == "Home":
                         for ticker, shares in live_shares.items():
                             if shares <= 0:
                                 continue
-                            price_native = get_stock_price_on(ticker, date, portfolio_data)
+                            price_native = get_price_native(ticker, date, portfolio_data)
                             if price_native is None:
                                 continue
                             ccy       = portfolio_holdings.get(ticker, {}).get("currency", "USD")
-                            price_usd = price_native * get_fx_to_usd(ccy, date)
+                            price_usd = price_native * get_rate_usd(ccy, date)
                             equity_usd += price_usd * shares
 
-                        total_nav = cash_usd + equity_usd
-                        nav_usd.append(total_nav)
-                        equity_usd_daily.append(equity_usd)
-                        cash_usd_daily.append(cash_usd)
+                        nav_usd_list.append(cash_usd + equity_usd)
+                        equity_usd_list.append(equity_usd)
+                        cash_usd_list.append(cash_usd)
 
-                    nav_series    = pd.Series(nav_usd,          index=dates)
-                    equity_series = pd.Series(equity_usd_daily, index=dates)
-                    cash_series   = pd.Series(cash_usd_daily,   index=dates)
+                    nav_series    = pd.Series(nav_usd_list,    index=dates)
+                    equity_series = pd.Series(equity_usd_list, index=dates)
+                    cash_series   = pd.Series(cash_usd_list,   index=dates)
 
                     # ── Performance chart ─────────────────────────────────────
                     st.subheader("📈 Portfolio vs MSCI World Performance")
 
-                    port_norm = (nav_series / FUND_SIZE_USD * 100)
-                    msci_norm = (msci_close / msci_close.iloc[0] * 100)
+                    port_norm = nav_series / FUND_SIZE_USD * 100
+                    msci_norm = msci_close / msci_close.iloc[0] * 100
 
                     fig_perf = go.Figure()
-
-                    # Total NAV
                     fig_perf.add_trace(go.Scatter(
                         x=dates, y=port_norm, mode="lines",
-                        name="Total NAV (equity + cash)",
+                        name="Total NAV (equity + cash, USD)",
                         line=dict(color="#0F1D64", width=3),
                         hovertemplate="<b>Total NAV</b><br>%{x}<br>$%{customdata:,.0f}<extra></extra>",
                         customdata=nav_series.values,
                     ))
-                    # MSCI World
                     fig_perf.add_trace(go.Scatter(
                         x=dates, y=msci_norm, mode="lines",
                         name="MSCI World (URTH)",
                         line=dict(color="#FF6B6B", width=2),
                         hovertemplate="<b>MSCI World</b><br>%{x}<br>Index: %{y:.2f}<extra></extra>",
                     ))
-
                     fig_perf.update_layout(
-                        title="Fund NAV vs MSCI World (Base 100 = $1,000,000 USD)",
+                        title="Fund NAV vs MSCI World (Base 100 = $1,000,000 USD) — all FX converted to USD",
                         xaxis_title="Date", yaxis_title="Index Value (Base 100)",
                         hovermode="x unified", height=520, template="plotly_white",
-                        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+                        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
                     )
                     st.plotly_chart(fig_perf, use_container_width=True)
 
@@ -928,27 +807,23 @@ elif main_page == "Home":
                     port_ret_total = (final_nav - FUND_SIZE_USD) / FUND_SIZE_USD * 100
                     msci_ret_total = (msci_close.iloc[-1] - msci_close.iloc[0]) / msci_close.iloc[0] * 100
                     outperf        = port_ret_total - msci_ret_total
-                    cash_pct       = final_cash / final_nav * 100
+                    cash_pct       = final_cash / final_nav * 100 if final_nav > 0 else 0
 
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Fund NAV",          f"${final_nav:,.0f}",
-                              delta=f"{port_ret_total:.2f}% vs $1M")
-                    c2.metric("Equity Value",       f"${final_equity:,.0f}",
-                              delta=f"{final_equity/final_nav*100:.1f}% of NAV")
-                    c3.metric("Cash (USD)",         f"${final_cash:,.0f}",
-                              delta=f"{cash_pct:.1f}% of NAV")
-                    c4.metric("vs MSCI World",      f"{outperf:+.2f}%",
-                              delta=f"{outperf:+.2f}%")
+                    c1.metric("Fund NAV (USD)",    f"${final_nav:,.0f}",      delta=f"{port_ret_total:.2f}% vs $1M")
+                    c2.metric("Equity Value (USD)", f"${final_equity:,.0f}",  delta=f"{final_equity/final_nav*100:.1f}% of NAV")
+                    c3.metric("Cash (USD)",         f"${final_cash:,.0f}",    delta=f"{cash_pct:.1f}% of NAV")
+                    c4.metric("vs MSCI World",      f"{outperf:+.2f}%",       delta=f"{outperf:+.2f}%")
 
                     st.info(f"""
-**Fund Summary:** Initial capital **$1,000,000 USD** | 
-Fund return **{port_ret_total:+.2f}%** | 
-MSCI World **{msci_ret_total:+.2f}%** | 
-Alpha **{outperf:+.2f}%** | 
-Cash drag **{cash_pct:.1f}%** of NAV
+**Fund Summary (all amounts in USD):** Initial capital **$1,000,000** | 
+Fund return **{port_ret_total:+.2f}%** | MSCI World **{msci_ret_total:+.2f}%** | 
+Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV  
+*Non-USD positions (e.g. INR, HKD) are converted to USD using live FX rates.*
 """)
-                    # ── Treemap (USD, includes cash) ───────────────────────────
-                    st.subheader("🗺️ Portfolio Composition Treemap")
+
+                    # ── Treemap ───────────────────────────────────────────────
+                    st.subheader("🗺️ Portfolio Composition Treemap (USD)")
                     treemap_data = []
                     final_date   = dates[-1]
 
@@ -958,36 +833,41 @@ Cash drag **{cash_pct:.1f}%** of NAV
                         info = portfolio_holdings.get(ticker)
                         if info is None:
                             continue
-                        price_native = get_stock_price_on(ticker, final_date, portfolio_data)
+                        price_native = get_price_native(ticker, final_date, portfolio_data)
                         if price_native is None:
                             continue
                         ccy       = info["currency"]
-                        price_usd = price_native * get_fx_to_usd(ccy, final_date)
+                        price_usd = price_native * get_rate_usd(ccy, final_date)
                         curr_val  = price_usd * shares
 
                         # Cost basis in USD
-                        buy_tx = all_tx[(all_tx["Ticker"] == ticker) & (all_tx["Action"] == "Buy")]
+                        buy_tx   = all_tx[(all_tx["Ticker"] == ticker) & (all_tx["Action"] == "Buy")]
                         cost_usd = 0.0
                         for _, brow in buy_tx.iterrows():
-                            bp = get_stock_price_on(ticker, brow["Date"], portfolio_data)
-                            if bp is None: bp = info["purchase_price"]
-                            cost_usd += bp * get_fx_to_usd(ccy, brow["Date"]) * int(brow["Quantity"])
-                        avg_cost = cost_usd / shares if shares > 0 else 0
-                        perf = (price_usd - avg_cost) / avg_cost * 100 if avg_cost > 0 else 0
+                            bp = get_price_native(ticker, brow["Date"], portfolio_data)
+                            if bp is None:
+                                bp = info["purchase_price"]   # native price
+                            bp_usd    = bp * _fx_rate_on_date(ccy, brow["Date"], fx_series_usd.get(ccy), "USD")
+                            cost_usd += bp_usd * int(brow["Quantity"])
+
+                        avg_cost_usd = cost_usd / shares if shares > 0 else 0
+                        perf = (price_usd - avg_cost_usd) / avg_cost_usd * 100 if avg_cost_usd > 0 else 0
 
                         treemap_data.append({
                             "ticker": ticker, "name": info.get("name", ticker),
                             "weight": curr_val / final_nav * 100,
                             "performance": perf, "value": curr_val,
                             "currency": ccy,
+                            "price_native": price_native,
+                            "price_usd": price_usd,
                         })
 
-                    # Add cash as a treemap entry
+                    # Cash row
                     treemap_data.append({
                         "ticker": "CASH", "name": "Cash (USD)",
                         "weight": final_cash / final_nav * 100,
                         "performance": 0.0, "value": final_cash,
-                        "currency": "USD",
+                        "currency": "USD", "price_native": 1.0, "price_usd": 1.0,
                     })
 
                     treemap_df = pd.DataFrame(treemap_data)
@@ -1001,60 +881,55 @@ Cash drag **{cash_pct:.1f}%** of NAV
                     fig_tm.update_traces(
                         textposition="middle center",
                         texttemplate="<b>%{label}</b><br>%{value:.1f}%",
-                        hovertemplate="<b>%{label}</b><br>Weight: %{customdata[0]:.2f}%<br>Return: %{customdata[1]:.2f}%<br>Value: $%{customdata[2]:,.0f}<br>Ccy: %{customdata[3]}<extra></extra>",
+                        hovertemplate="<b>%{label}</b><br>Weight: %{customdata[0]:.2f}%<br>Return: %{customdata[1]:.2f}%<br>Value (USD): $%{customdata[2]:,.0f}<br>Ccy: %{customdata[3]}<extra></extra>",
                     )
-                    fig_tm.update_layout(height=600, margin=dict(t=50,l=0,r=0,b=0))
+                    fig_tm.update_layout(height=600, margin=dict(t=50, l=0, r=0, b=0))
                     st.plotly_chart(fig_tm, use_container_width=True)
 
-                    # ── Holdings table (USD, includes cash row) ───────────────
-                    st.subheader("📋 Holdings Details (USD)")
+                    # ── Holdings table ────────────────────────────────────────
+                    st.subheader("📋 Holdings Details (USD, all FX converted)")
                     ht = treemap_df.copy()
                     ht["Return (%)"]   = ht["performance"].apply(lambda x: f"{x:.2f}%")
                     ht["Weight (%)"]   = ht["weight"].apply(lambda x: f"{x:.2f}%")
                     ht["Value (USD)"]  = ht["value"].apply(lambda x: f"${x:,.0f}")
-                    ht = ht[["name","ticker","currency","Weight (%)","Return (%)","Value (USD)"]]
-                    ht.columns = ["Company","Ticker","Currency","Weight","Return","Value (USD)"]
+                    ht["Native Price"] = ht.apply(
+                        lambda r: f"{r['price_native']:.2f} {r['currency']}" if r["ticker"] != "CASH" else "—",
+                        axis=1
+                    )
+                    ht["USD Price"]    = ht.apply(
+                        lambda r: f"${r['price_usd']:.4f}" if r["ticker"] != "CASH" else "—",
+                        axis=1
+                    )
+                    ht = ht[["name","ticker","currency","Native Price","USD Price","Weight (%)","Return (%)","Value (USD)"]]
+                    ht.columns = ["Company","Ticker","Native Ccy","Native Price","USD Price","Weight","Return","Value (USD)"]
                     st.dataframe(ht.sort_values("Return", ascending=False),
                                  use_container_width=True, hide_index=True)
 
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
                     import traceback; st.code(traceback.format_exc())
-    # -------------------------------------------------------------------------
+
+    # =========================================================================
     # HOME - Portfolio Structure Analysis
-    # -------------------------------------------------------------------------
+    # =========================================================================
     elif home_tab == "Portfolio Structure Analysis":
         st.header("🏗️ Portfolio Structure Analysis")
 
-        # ── Country/region auto-fetched from yfinance HQ data ──────────────
         @st.cache_data(show_spinner=False)
         def fetch_hq_countries(tickers: tuple) -> dict:
-            """
-            For each ticker fetch headquarters country from yfinance .info.
-            Returns {ticker: country_name}.
-            Falls back to exchange-based inference if yfinance field is missing.
-            """
             EXCHANGE_COUNTRY_FALLBACK = {
                 ".NS": "India", ".BO": "India",
                 ".DE": "Germany", ".F": "Germany",
-                ".SW": "Switzerland",
-                ".PA": "France",
-                ".AS": "Netherlands",
-                ".L":  "United Kingdom",
-                ".HK": "Hong Kong",
-                ".AX": "Australia",
+                ".SW": "Switzerland", ".PA": "France",
+                ".AS": "Netherlands", ".L": "United Kingdom",
+                ".HK": "Hong Kong", ".AX": "Australia",
                 ".TO": "Canada", ".V": "Canada",
-                ".T":  "Japan",
-                ".KS": "South Korea",
+                ".T": "Japan", ".KS": "South Korea",
                 ".SS": "China", ".SZ": "China",
-                ".BR": "Belgium",
-                ".ST": "Sweden",
-                ".CO": "Denmark",
-                ".OL": "Norway",
-                ".HE": "Finland",
-                ".LS": "Portugal",
-                ".MC": "Spain",
-                ".MI": "Italy",
+                ".BR": "Belgium", ".ST": "Sweden",
+                ".CO": "Denmark", ".OL": "Norway",
+                ".HE": "Finland", ".LS": "Portugal",
+                ".MC": "Spain", ".MI": "Italy",
                 ".LI": "Liechtenstein",
             }
             result = {}
@@ -1067,16 +942,14 @@ Cash drag **{cash_pct:.1f}%** of NAV
                         continue
                 except Exception:
                     pass
-                # Fallback: infer from ticker suffix
                 for suffix, country in EXCHANGE_COUNTRY_FALLBACK.items():
                     if ticker.upper().endswith(suffix.upper()):
                         result[ticker] = country
                         break
                 else:
-                    result[ticker] = "United States"  # bare tickers (no suffix) are typically US
+                    result[ticker] = "United States"
             return result
 
-        # Comprehensive region and ISO mappings
         region_mapping = {
             "India": "APAC", "China": "APAC", "Hong Kong": "APAC",
             "Japan": "APAC", "South Korea": "APAC", "Australia": "APAC",
@@ -1108,23 +981,13 @@ Cash drag **{cash_pct:.1f}%** of NAV
 
         with st.spinner("Fetching HQ countries from yfinance…"):
             country_mapping = fetch_hq_countries(tuple(sorted(portfolio_holdings.keys())))
+
         try:
             with st.spinner("Loading portfolio structure…"):
-                ex_rates_cur = {}
-                used_currencies_struct = {info["currency"] for info in portfolio_holdings.values()}
-                for currency in used_currencies_struct:
-                    if currency == "CHF":
-                        ex_rates_cur[currency] = 1.0
-                    else:
-                        pair = get_fx_pair(currency)
-                        if pair:
-                            try:
-                                fx_d = yf.Ticker(pair).history(period="1d")
-                                ex_rates_cur[currency] = float(fx_d["Close"].iloc[-1]) if not fx_d.empty else FALLBACK_FX_TO_CHF.get(currency, 1.0)
-                            except Exception:
-                                ex_rates_cur[currency] = FALLBACK_FX_TO_CHF.get(currency, 1.0)
-                        else:
-                            ex_rates_cur[currency] = 1.0
+                # Use spot CHF rates for structure page (shows CHF totals)
+                spot_chf_rates = {}
+                for ccy in {info["currency"] for info in portfolio_holdings.values()}:
+                    spot_chf_rates[ccy] = _spot_fx(ccy, "CHF")
 
                 cur_prices = {}
                 co_info    = {}
@@ -1143,17 +1006,18 @@ Cash drag **{cash_pct:.1f}%** of NAV
                         co_info[ticker]    = {"market_cap": 0}
 
             def classify_mc(mc):
-                if mc == 0:            return "Unknown"
-                elif mc >= 10e9:       return "Large"
-                elif mc >= 2e9:        return "Mid"
-                else:                  return "Small"
+                if mc == 0:      return "Unknown"
+                elif mc >= 10e9: return "Large"
+                elif mc >= 2e9:  return "Mid"
+                else:            return "Small"
 
             holdings_analysis = []
-            total_chf = 0
+            total_chf = 0.0
             for ticker, info in portfolio_holdings.items():
                 if ticker in cur_prices:
-                    fx  = ex_rates_cur[info["currency"]]
-                    val = cur_prices[ticker] * info["quantity"] * fx
+                    # price is in native currency; convert to CHF
+                    fx   = spot_chf_rates.get(info["currency"], FALLBACK_FX_TO_CHF.get(info["currency"], 1.0))
+                    val  = cur_prices[ticker] * info["quantity"] * fx
                     total_chf += val
                     country = country_mapping.get(ticker) or "United States"
                     holdings_analysis.append({
@@ -1165,12 +1029,11 @@ Cash drag **{cash_pct:.1f}%** of NAV
                     })
 
             for h in holdings_analysis:
-                h["weight"] = h["value_chf"] / total_chf * 100
+                h["weight"] = h["value_chf"] / total_chf * 100 if total_chf > 0 else 0
 
             df_an = pd.DataFrame(holdings_analysis)
             blue  = ["#0F1D64","#1E3A8A","#3B82F6","#60A5FA","#93C5FD","#DBEAFE"]
 
-            # Sector donut
             st.subheader("📊 Sector Distribution")
             sec_alloc = df_an.groupby("sector")["weight"].sum().reset_index()
             sec_alloc.columns = ["Sector","Weight (%)"]
@@ -1187,7 +1050,6 @@ Cash drag **{cash_pct:.1f}%** of NAV
                 for _, r in sec_alloc.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Sector"], f"{r['Weight (%)']:.1f}%")
 
-            # Geo map
             st.subheader("🌍 Geographical Distribution")
             c1, c2 = st.columns([2,1])
             with c1:
@@ -1198,7 +1060,7 @@ Cash drag **{cash_pct:.1f}%** of NAV
                                         hover_data={"ISO":False,"Weight (%)":":.2f"},
                                         color_continuous_scale=[[0,"#DBEAFE"],[0.25,"#93C5FD"],
                                                                  [0.5,"#60A5FA"],[0.75,"#3B82F6"],[1,"#0F1D64"]],
-                                        title="Geographic Distribution")
+                                        title="Geographic Distribution (CHF-weighted)")
                 fig_map.update_geos(showcountries=True, countrycolor="lightgray",
                                     showcoastlines=True, projection_type="natural earth")
                 fig_map.update_layout(height=450, margin=dict(l=0,r=0,t=40,b=0))
@@ -1214,7 +1076,6 @@ Cash drag **{cash_pct:.1f}%** of NAV
                 st.dataframe(cnt_alloc[["Country","Weight (%)"]].sort_values("Weight (%)", ascending=False)
                              .style.format({"Weight (%)":"{:.1f}%"}), use_container_width=True, hide_index=True)
 
-            # Market cap & currency
             st.subheader("📈 Additional Analysis")
             c1, c2 = st.columns(2)
             with c1:
@@ -1229,18 +1090,18 @@ Cash drag **{cash_pct:.1f}%** of NAV
                 cur_alloc = df_an.groupby("currency")["weight"].sum().reset_index()
                 cur_alloc.columns = ["Currency","Weight (%)"]
                 fig_cur = px.pie(cur_alloc, values="Weight (%)", names="Currency",
-                                 title="Currency Exposure", color_discrete_sequence=blue)
+                                 title="Native Currency Exposure",
+                                 color_discrete_sequence=blue)
                 fig_cur.update_traces(textposition="inside", textinfo="percent+label")
                 fig_cur.update_layout(height=350)
                 st.plotly_chart(fig_cur, use_container_width=True)
 
-            # Concentration
             st.subheader("🎯 Concentration Metrics")
-            df_sorted   = df_an.sort_values("weight", ascending=False)
-            top5_conc   = df_sorted.head(5)["weight"].sum()
-            top10_conc  = df_sorted.head(10)["weight"].sum()
-            hhi         = (df_an["weight"] ** 2).sum()
-            c1, c2, c3  = st.columns(3)
+            df_sorted  = df_an.sort_values("weight", ascending=False)
+            top5_conc  = df_sorted.head(5)["weight"].sum()
+            top10_conc = df_sorted.head(10)["weight"].sum()
+            hhi        = (df_an["weight"] ** 2).sum()
+            c1, c2, c3 = st.columns(3)
             c1.metric("Top 5 Holdings",  f"{top5_conc:.1f}%")
             c2.metric("Top 10 Holdings", f"{top10_conc:.1f}%")
             with c3:
@@ -1248,12 +1109,12 @@ Cash drag **{cash_pct:.1f}%** of NAV
                 st.caption("✅ Well diversified" if hhi < 1000 else "⚠️ Moderately concentrated" if hhi < 1800 else "🔴 Highly concentrated")
 
             st.markdown("### Top 10 Holdings by Weight")
-            th = df_sorted[["name","sector","country","weight"]].head(10).copy()
-            th.columns = ["Company","Sector","Country","Weight (%)"]
+            th = df_sorted[["name","sector","country","currency","weight"]].head(10).copy()
+            th.columns = ["Company","Sector","Country","Native Ccy","Weight (%)"]
             th["Weight (%)"] = th["Weight (%)"].apply(lambda x: f"{x:.2f}%")
             st.dataframe(th, use_container_width=True, hide_index=True)
 
-            st.subheader("📋 Portfolio Summary")
+            st.subheader("📋 Portfolio Summary (CHF)")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Holdings",  len(df_an))
             c2.metric("Total Value",     f"CHF {total_chf:,.2f}")
@@ -1263,9 +1124,10 @@ Cash drag **{cash_pct:.1f}%** of NAV
         except Exception as e:
             st.error(f"An error occurred: {e}")
             import traceback; st.code(traceback.format_exc())
-    # -------------------------------------------------------------------------
+
+    # =========================================================================
     # HOME - Forecast
-    # -------------------------------------------------------------------------
+    # =========================================================================
     elif home_tab == "Forecast":
         st.header("🔮 Portfolio Forecast")
 
@@ -1275,7 +1137,10 @@ Cash drag **{cash_pct:.1f}%** of NAV
                 try:
                     hist = yf.Ticker(ticker).history(period="1y")
                     if not hist.empty:
-                        stock_data[ticker] = {"current_price": hist["Close"].iloc[-1], "historical": hist}
+                        stock_data[ticker] = {
+                            "current_price": hist["Close"].iloc[-1],   # native currency
+                            "historical": hist,
+                        }
                 except Exception as e:
                     st.error(f"Error fetching data for {ticker}: {e}")
 
@@ -1284,24 +1149,36 @@ Cash drag **{cash_pct:.1f}%** of NAV
         # ── Monte Carlo ──────────────────────────────────────────────────────
         with forecast_method[0]:
             st.subheader("📊 Monte Carlo Simulation")
-            st.markdown("Probabilistic portfolio performance projections based on historical volatility")
+            st.markdown("Probabilistic portfolio performance projections (values in USD, all FX converted)")
 
             c1, c2, c3 = st.columns(3)
-            with c1: num_sim = st.number_input("Simulations",   100, 10000, 1000, 100)
-            with c2: time_h  = st.number_input("Horizon (days)", 30, 1825,   252,  30)
+            with c1: num_sim = st.number_input("Simulations",    100, 10000, 1000, 100)
+            with c2: time_h  = st.number_input("Horizon (days)",  30,  1825,  252,  30)
             with c3:
-                tot_val  = sum(stock_data[t]["current_price"] * portfolio_holdings[t]["quantity"]
-                               for t in portfolio_holdings if t in stock_data)
-                init_inv = st.number_input("Initial Portfolio Value ($)", 1000, value=int(tot_val), step=1000)
+                # Compute total portfolio value in USD using spot rates
+                tot_val = sum(
+                    stock_data[t]["current_price"]
+                    * portfolio_holdings[t]["quantity"]
+                    * _spot_fx(portfolio_holdings[t]["currency"], "USD")
+                    for t in portfolio_holdings if t in stock_data
+                )
+                init_inv = st.number_input("Initial Portfolio Value (USD)", 1000, value=int(tot_val), step=1000)
 
             if st.button("Run Monte Carlo Simulation", type="primary"):
                 with st.spinner("Running simulations…"):
-                    pv = {t: stock_data[t]["current_price"] * portfolio_holdings[t]["quantity"]
-                          for t in portfolio_holdings if t in stock_data}
+                    # Portfolio weights in USD
+                    pv = {
+                        t: stock_data[t]["current_price"]
+                           * portfolio_holdings[t]["quantity"]
+                           * _spot_fx(portfolio_holdings[t]["currency"], "USD")
+                        for t in portfolio_holdings if t in stock_data
+                    }
                     tot = sum(pv.values())
                     wts = {t: pv[t] / tot for t in pv}
-                    ret_data = {t: stock_data[t]["historical"]["Close"].pct_change().dropna()
-                                for t in portfolio_holdings if t in stock_data}
+                    ret_data = {
+                        t: stock_data[t]["historical"]["Close"].pct_change().dropna()
+                        for t in portfolio_holdings if t in stock_data
+                    }
                     ret_df = pd.DataFrame(ret_data).dropna()
 
                     if ret_df.empty or len(ret_df) < 30:
@@ -1334,9 +1211,11 @@ Cash drag **{cash_pct:.1f}%** of NAV
                                                  (p95,"95th %ile (Bull)","green")]:
                             fig.add_trace(go.Scatter(x=list(range(time_h)), y=arr,
                                                      mode="lines", name=name, line=dict(color=color, width=3)))
-                        fig.update_layout(title=f"Monte Carlo: {num_sim} scenarios over {time_h} days",
-                                          xaxis_title="Days", yaxis_title="Portfolio Value ($)",
-                                          height=500, hovermode="x unified")
+                        fig.update_layout(
+                            title=f"Monte Carlo: {num_sim} scenarios over {time_h} days (USD)",
+                            xaxis_title="Days", yaxis_title="Portfolio Value (USD)",
+                            height=500, hovermode="x unified",
+                        )
                         st.plotly_chart(fig, use_container_width=True)
 
                         c1, c2, c3, c4 = st.columns(4)
@@ -1347,41 +1226,62 @@ Cash drag **{cash_pct:.1f}%** of NAV
         # ── Analyst Consensus ────────────────────────────────────────────────
         with forecast_method[1]:
             st.subheader("📈 Analyst Consensus Forecast")
+            st.caption("Target prices are in native currency; values converted to USD for comparison.")
             analyst_data = []
             for ticker in portfolio_holdings:
-                if ticker not in stock_data: continue
+                if ticker not in stock_data:
+                    continue
                 try:
-                    info_ = yf.Ticker(ticker).info
-                    cp    = stock_data[ticker]["current_price"]
-                    tp    = info_.get("targetMeanPrice")
-                    if tp:
-                        up  = (tp - cp) / cp * 100
-                        cv  = cp * portfolio_holdings[ticker]["quantity"]
-                        pv_ = cv * (1 + up / 100)
-                        analyst_data.append({"Ticker":ticker,"Current Price":cp,"Target Price":tp,
-                                             "Upside/Downside":up,"Analysts":info_.get("numberOfAnalystOpinions",0),
-                                             "Recommendation":info_.get("recommendationKey","N/A").upper(),
-                                             "Current Value":cv,"Projected Value":pv_,"Potential Gain":pv_-cv})
+                    info_    = yf.Ticker(ticker).info
+                    ccy      = portfolio_holdings[ticker]["currency"]
+                    fx_spot  = _spot_fx(ccy, "USD")
+                    cp_native = stock_data[ticker]["current_price"]
+                    cp_usd   = cp_native * fx_spot
+                    tp_native = info_.get("targetMeanPrice")
+                    if tp_native:
+                        tp_usd = tp_native * fx_spot
+                        up     = (tp_usd - cp_usd) / cp_usd * 100
+                        cv     = cp_usd * portfolio_holdings[ticker]["quantity"]
+                        pv_    = cv * (1 + up / 100)
+                        analyst_data.append({
+                            "Ticker": ticker, "Currency": ccy,
+                            f"Current Price ({ccy})": cp_native,
+                            f"Target Price ({ccy})": tp_native,
+                            "Current Price (USD)": cp_usd,
+                            "Target Price (USD)": tp_usd,
+                            "Upside/Downside": up,
+                            "Analysts": info_.get("numberOfAnalystOpinions", 0),
+                            "Recommendation": info_.get("recommendationKey", "N/A").upper(),
+                            "Current Value (USD)": cv,
+                            "Projected Value (USD)": pv_,
+                            "Potential Gain (USD)": pv_ - cv,
+                        })
                 except Exception as e:
                     st.warning(f"Could not fetch analyst data for {ticker}: {e}")
 
             if analyst_data:
                 da = pd.DataFrame(analyst_data)
-                tc = da["Current Value"].sum(); tp_ = da["Projected Value"].sum()
-                tg = da["Potential Gain"].sum(); wu  = tg / tc * 100
+                tc = da["Current Value (USD)"].sum()
+                tp_ = da["Projected Value (USD)"].sum()
+                tg  = da["Potential Gain (USD)"].sum()
+                wu  = tg / tc * 100 if tc > 0 else 0
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Current Portfolio Value",   f"${tc:,.0f}")
-                c2.metric("Projected Value (12M)",     f"${tp_:,.0f}", f"{wu:.1f}%")
-                c3.metric("Potential Gain",            f"${tg:,.0f}")
+                c1.metric("Current Portfolio Value (USD)",  f"${tc:,.0f}")
+                c2.metric("Projected Value (12M, USD)",     f"${tp_:,.0f}", f"{wu:.1f}%")
+                c3.metric("Potential Gain (USD)",           f"${tg:,.0f}")
+
                 dd = da.copy()
-                for col in ["Current Price","Target Price"]:         dd[col] = dd[col].apply(lambda x: f"${x:.2f}")
-                dd["Upside/Downside"]  = dd["Upside/Downside"].apply(lambda x: f"{x:.1f}%")
-                for col in ["Current Value","Projected Value","Potential Gain"]: dd[col] = dd[col].apply(lambda x: f"${x:,.0f}")
+                for col in ["Current Price (USD)","Target Price (USD)","Current Value (USD)","Projected Value (USD)","Potential Gain (USD)"]:
+                    dd[col] = dd[col].apply(lambda x: f"${x:,.2f}")
+                dd["Upside/Downside"] = dd["Upside/Downside"].apply(lambda x: f"{x:.1f}%")
                 st.dataframe(dd, use_container_width=True, hide_index=True)
-                fig = go.Figure(go.Bar(x=da["Ticker"], y=da["Upside/Downside"],
-                                       marker_color=["green" if x > 0 else "red" for x in da["Upside/Downside"]],
-                                       text=[f"{x:.1f}%" for x in da["Upside/Downside"]], textposition="outside"))
-                fig.update_layout(title="Analyst Consensus: Upside/Downside", height=400, showlegend=False)
+
+                fig = go.Figure(go.Bar(
+                    x=da["Ticker"], y=da["Upside/Downside"],
+                    marker_color=["green" if x > 0 else "red" for x in da["Upside/Downside"]],
+                    text=[f"{x:.1f}%" for x in da["Upside/Downside"]], textposition="outside",
+                ))
+                fig.update_layout(title="Analyst Consensus: Upside/Downside (USD-normalised)", height=400, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("No analyst consensus data available.")
@@ -1389,52 +1289,59 @@ Cash drag **{cash_pct:.1f}%** of NAV
         # ── DCF ──────────────────────────────────────────────────────────────
         with forecast_method[2]:
             st.subheader("💰 DCF Analysis")
-            st.info("Simplified DCF model. Consult financial statements for accurate valuations.")
+            st.info("Simplified DCF model — values remain in the stock's native currency.")
             sel = st.selectbox("Select Stock for DCF Analysis",
                                [t for t in portfolio_holdings if t in stock_data])
             if sel:
-                c1, c2 = st.columns(2)
+                ccy_sel = portfolio_holdings[sel]["currency"]
+                c1, c2  = st.columns(2)
                 with c1:
-                    st.subheader("Input Parameters")
+                    st.subheader(f"Input Parameters ({ccy_sel})")
                     try:
                         cf = yf.Ticker(sel).cashflow
                         fcf_default = int(abs(cf.loc["Free Cash Flow"].iloc[0])) if not cf.empty and "Free Cash Flow" in cf.index else 1_000_000_000
                     except Exception:
                         fcf_default = 1_000_000_000
-                    fcf_in = st.number_input("Current Free Cash Flow ($)", 0, value=fcf_default, step=1_000_000)
-                    gr     = st.slider("Growth Rate (%)",       -10.0, 50.0, 5.0, 0.5)
+                    fcf_in = st.number_input(f"Current Free Cash Flow ({ccy_sel})", 0, value=fcf_default, step=1_000_000)
+                    gr     = st.slider("Growth Rate (%)", -10.0, 50.0, 5.0, 0.5)
                     py     = st.number_input("Projection (years)", 1, 10, 5)
-                    wacc_  = st.slider("WACC (%)",               1.0, 20.0, 10.0, 0.5)
-                    tg     = st.slider("Terminal Growth (%)",    0.0,  5.0,  2.5, 0.1)
+                    wacc_  = st.slider("WACC (%)", 1.0, 20.0, 10.0, 0.5)
+                    tg     = st.slider("Terminal Growth (%)", 0.0, 5.0, 2.5, 0.1)
                     try:    so = int(yf.Ticker(sel).info.get("sharesOutstanding", 1_000_000_000))
                     except: so = 1_000_000_000
                     shares = st.number_input("Shares Outstanding", 1_000_000, value=so, step=1_000_000)
 
                 with c2:
-                    st.subheader("DCF Calculation")
+                    st.subheader(f"DCF Calculation ({ccy_sel})")
                     pf = [fcf_in * (1 + gr / 100) ** y for y in range(1, py + 1)]
                     pv = [pf[i] / (1 + wacc_ / 100) ** (i + 1) for i in range(py)]
                     tv = pf[-1] * (1 + tg / 100) / (wacc_ / 100 - tg / 100)
                     pv_tv = tv / (1 + wacc_ / 100) ** py
                     ev   = sum(pv) + pv_tv
-                    fv   = ev / shares
-                    cp   = stock_data[sel]["current_price"]
-                    ud   = (fv - cp) / cp * 100
+                    fv   = ev / shares                                      # native currency
+                    fv_usd = fv * _spot_fx(ccy_sel, "USD")
+                    cp   = stock_data[sel]["current_price"]                 # native currency
+                    cp_usd = cp * _spot_fx(ccy_sel, "USD")
+                    ud   = (fv - cp) / cp * 100 if cp > 0 else 0
 
                     m1, m2 = st.columns(2)
-                    m1.metric("Fair Value per Share", f"${fv:.2f}")
-                    m1.metric("Enterprise Value",     f"${ev/1e9:.2f}B")
-                    m2.metric("Current Price",        f"${cp:.2f}")
-                    m2.metric("Upside/Downside",      f"{ud:.1f}%", delta=f"{ud:.1f}%")
+                    m1.metric(f"Fair Value ({ccy_sel})", f"{fv:.2f}")
+                    m1.metric("Fair Value (USD)",         f"${fv_usd:.2f}")
+                    m1.metric("Enterprise Value",         f"{ccy_sel} {ev/1e9:.2f}B")
+                    m2.metric(f"Current Price ({ccy_sel})", f"{cp:.2f}")
+                    m2.metric("Current Price (USD)",         f"${cp_usd:.2f}")
+                    m2.metric("Upside/Downside",             f"{ud:.1f}%", delta=f"{ud:.1f}%")
 
-                    dcf_rows = [{"Year": y+1, "Projected FCF": f"${pf[y]/1e6:.1f}M",
+                    dcf_rows = [{"Year": y+1,
+                                 f"Projected FCF ({ccy_sel})": f"{pf[y]/1e6:.1f}M",
                                  "Discount Factor": f"{1/(1+wacc_/100)**(y+1):.4f}",
-                                 "Present Value": f"${pv[y]/1e6:.1f}M"} for y in range(py)]
+                                 f"Present Value ({ccy_sel})": f"{pv[y]/1e6:.1f}M"} for y in range(py)]
                     st.dataframe(pd.DataFrame(dcf_rows), use_container_width=True, hide_index=True)
 
-                    if ud > 20:      st.success(f"💡 **Undervalued** by {ud:.1f}%")
-                    elif ud < -20:   st.error(f"💡 **Overvalued** by {abs(ud):.1f}%")
-                    else:            st.info("💡 **Fairly valued** (within ±20%)")
+                    if ud > 20:    st.success(f"💡 **Undervalued** by {ud:.1f}%")
+                    elif ud < -20: st.error(f"💡 **Overvalued** by {abs(ud):.1f}%")
+                    else:          st.info("💡 **Fairly valued** (within ±20%)")
+
 # =============================================================================
 # SECTOR PAGES
 # =============================================================================
@@ -1458,11 +1365,11 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
             if st.button("📈 Performance Analysis", key=f"perf_{sector_name}", use_container_width=True):
                 st.session_state.sector_tab = "Performance Analysis"; st.rerun()
         with c2:
-            if st.button("💰 Financial Analysis",   key=f"fin_{sector_name}",  use_container_width=True):
-                st.session_state.sector_tab = "Financial Analysis";  st.rerun()
+            if st.button("💰 Financial Analysis", key=f"fin_{sector_name}", use_container_width=True):
+                st.session_state.sector_tab = "Financial Analysis"; st.rerun()
         with c3:
-            if st.button("🏢 Company Specific",     key=f"spec_{sector_name}", use_container_width=True):
-                st.session_state.sector_tab = "Company Specific";    st.rerun()
+            if st.button("🏢 Company Specific", key=f"spec_{sector_name}", use_container_width=True):
+                st.session_state.sector_tab = "Company Specific"; st.rerun()
 
         st.markdown("---")
         sector_tab = st.session_state.sector_tab
@@ -1487,20 +1394,12 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         from scipy import stats as scipy_stats
                         with st.spinner(f"Fetching {sector_name} data…"):
                             bm_data = yf.download(bm_ticker, start=start_date, end=end_date, progress=False)
-                            used_currencies_s = {info["currency"] for info in sector_holdings.values()}
-                            ex_rates = {}
-                            for currency in used_currencies_s:
-                                if currency == "CHF":
-                                    ex_rates[currency] = None
-                                else:
-                                    pair = get_fx_pair(currency)
-                                    if pair:
-                                        try:
-                                            ex_rates[currency] = yf.download(pair, start=start_date, end=end_date, progress=False)
-                                        except Exception:
-                                            ex_rates[currency] = pd.DataFrame()
-                                    else:
-                                        ex_rates[currency] = None
+                            bm_close = bm_data["Close"].iloc[:,0] if isinstance(bm_data["Close"],pd.DataFrame) else bm_data["Close"]
+
+                            # Pre-fetch native→USD FX for all sector currencies
+                            used_ccy_s = {info["currency"] for info in sector_holdings.values()}
+                            fx_usd_s   = {ccy: _fetch_fx_series(ccy, start_date, end_date, "USD") for ccy in used_ccy_s}
+
                             sector_data  = {}
                             init_prices  = {}
                             cur_prices_s = {}
@@ -1512,36 +1411,30 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                     init_prices[ticker]  = float(cl.iloc[0])
                                     cur_prices_s[ticker] = float(cl.iloc[-1])
 
-                        def gfx(currency, date, er):
-                            fx_d = er.get(currency) if er else None
-                            if fx_d is None and currency != "CHF":
-                                pair = get_fx_pair(currency)
-                                if pair:
-                                    try:
-                                        fx_d = yf.download(pair, start=start_date, end=end_date, progress=False)
-                                        er[currency] = fx_d
-                                    except Exception:
-                                        pass
-                            return get_fx_rate_for_date(currency, date, fx_d)
+                        def get_price_s(ticker, date):
+                            if ticker not in sector_data: return None
+                            d  = sector_data[ticker]
+                            cl = d["Close"].iloc[:,0] if isinstance(d["Close"],pd.DataFrame) else d["Close"]
+                            av = cl.index[cl.index <= date]
+                            return float(cl.loc[av[-1]]) if len(av) > 0 else None
 
-                        all_dates   = bm_data.index
-                        sec_vals    = pd.Series(index=all_dates, dtype=float)
+                        def get_rate_s(currency, date):
+                            return _fx_rate_on_date(currency, date, fx_usd_s.get(currency), "USD")
+
+                        all_dates = bm_close.index
+                        sec_vals  = pd.Series(index=all_dates, dtype=float)
                         for date in all_dates:
-                            dv = 0
+                            dv = 0.0
                             for ticker, info in sector_holdings.items():
-                                if ticker in sector_data:
-                                    sd = sector_data[ticker]
-                                    sc = sd["Close"].iloc[:,0] if isinstance(sd["Close"],pd.DataFrame) else sd["Close"]
-                                    av = sc.index[sc.index <= date]
-                                    pr = float(sc.loc[av[-1]]) if len(av) > 0 else init_prices[ticker]
-                                    dv += pr * info["quantity"] * gfx(info["currency"], date, ex_rates)
+                                p = get_price_s(ticker, date)
+                                if p is None: continue
+                                dv += p * info["quantity"] * get_rate_s(info["currency"], date)
                             sec_vals[date] = dv
 
                         sec_ret = sec_vals.pct_change().dropna()
-                        bm_close = bm_data["Close"].iloc[:,0] if isinstance(bm_data["Close"],pd.DataFrame) else bm_data["Close"]
                         bm_ret  = bm_close.pct_change().dropna()
                         common  = sec_ret.index.intersection(bm_ret.index)
-                        sr      = sec_ret.loc[common]; br = bm_ret.loc[common]
+                        sr = sec_ret.loc[common]; br = bm_ret.loc[common]
 
                         trs = ((sec_vals.iloc[-1]/sec_vals.iloc[0])-1)*100
                         trb = ((bm_close.iloc[-1]/bm_close.iloc[0])-1)*100
@@ -1557,13 +1450,14 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         else:
                             beta = alpha_a = 0.0
 
-                        vol_s = sr.std() * np.sqrt(252) * 100
-                        vol_b = br.std() * np.sqrt(252) * 100
-                        cum   = (1+sr).cumprod(); mdd = ((cum - cum.expanding().max())/cum.expanding().max()).min()*100
+                        vol_s = sr.std()*np.sqrt(252)*100
+                        vol_b = br.std()*np.sqrt(252)*100
+                        cum   = (1+sr).cumprod()
+                        mdd   = ((cum - cum.expanding().max())/cum.expanding().max()).min()*100
                         act   = sr - br; te = act.std()*np.sqrt(252)
                         ir    = (act.mean()*252)/te if te != 0 else 0
 
-                        st.subheader("🎯 Key Performance Metrics")
+                        st.subheader("🎯 Key Performance Metrics (USD-based)")
                         c1, c2, c3, c4 = st.columns(4)
                         c1.metric("Total Return (Sector)",    f"{trs:.2f}%", delta=f"{trs-trb:.2f}% vs benchmark")
                         c1.metric("Sharpe Ratio",             f"{sharpe:.2f}")
@@ -1573,54 +1467,54 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         c3.metric("Max Drawdown",             f"{mdd:.2f}%")
                         c4.metric("Volatility (Benchmark)",   f"{vol_b:.2f}%")
                         c4.metric("Information Ratio",        f"{ir:.2f}")
-
                         c1, c2 = st.columns(2)
-                        c1.metric("Alpha (Annualized)",  f"{alpha_a*100:.2f}%")
-                        c2.metric("Tracking Error",      f"{te*100:.2f}%")
+                        c1.metric("Alpha (Annualized)", f"{alpha_a*100:.2f}%")
+                        c2.metric("Tracking Error",     f"{te*100:.2f}%")
 
-                        st.subheader(f"📊 {sector_name} vs {bm_ticker} Performance")
+                        st.subheader(f"📊 {sector_name} vs {bm_ticker} Performance (USD)")
                         sn = (sec_vals/sec_vals.iloc[0])*100
                         bn = (bm_close/bm_close.iloc[0])*100
                         fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=sn.index, y=sn, name=f"{sector_name} Portfolio", mode="lines"))
-                        fig.add_trace(go.Scatter(x=bn.index, y=bn, name=f"{bm_ticker} Benchmark",   mode="lines"))
+                        fig.add_trace(go.Scatter(x=sn.index, y=sn, name=f"{sector_name} Portfolio (USD)", mode="lines"))
+                        fig.add_trace(go.Scatter(x=bn.index, y=bn, name=f"{bm_ticker} Benchmark",         mode="lines"))
                         fig.update_xaxes(rangeselector=dict(buttons=[
                             dict(count=1,label="1M",step="month",stepmode="backward"),
                             dict(count=6,label="6M",step="month",stepmode="backward"),
                             dict(count=1,label="1Y",step="year",stepmode="backward"),
                             dict(step="all",label="All"),
                         ]))
-                        fig.update_layout(yaxis_title="Normalized Value (Base=100)", xaxis_title="Date")
+                        fig.update_layout(yaxis_title="Normalised Value (Base=100)", xaxis_title="Date")
                         st.plotly_chart(fig, use_container_width=True)
 
-                        # Holdings breakdown
-                        st.subheader("🏆 Holdings Performance Breakdown")
+                        st.subheader("🏆 Holdings Performance Breakdown (USD)")
                         hp = []
                         for ticker, info in sector_holdings.items():
                             if ticker in sector_data:
-                                ret_    = ((cur_prices_s[ticker]/init_prices[ticker])-1)*100
-                                iv_chf  = init_prices[ticker]*info["quantity"]*gfx(info["currency"],sec_vals.index[0],ex_rates)
-                                cv_chf  = cur_prices_s[ticker]*info["quantity"]*gfx(info["currency"],sec_vals.index[-1],ex_rates)
-                                wt      = iv_chf/sec_vals.iloc[0]*100
-                                contrib = (cv_chf-iv_chf)/sec_vals.iloc[0]*100
-                                hp.append({"Ticker":ticker,"Name":info["name"],"Return (%)":ret_,
-                                           "Weight (%)":wt,"Contribution (%)":contrib})
+                                ip = init_prices[ticker]; cp_ = cur_prices_s[ticker]
+                                ret_pct = ((cp_/ip)-1)*100
+                                # Value in USD using first/last date FX
+                                iv_usd = ip * get_rate_s(info["currency"], sec_vals.index[0])  * info["quantity"]
+                                cv_usd = cp_ * get_rate_s(info["currency"], sec_vals.index[-1]) * info["quantity"]
+                                wt     = iv_usd / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
+                                contrib = (cv_usd - iv_usd) / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
+                                hp.append({"Ticker":ticker,"Name":info["name"],
+                                           "Ccy": info["currency"],
+                                           "Return (%)":ret_pct,"Weight (%)":wt,"Contribution (%)":contrib})
+
                         pdf = pd.DataFrame(hp).sort_values("Return (%)", ascending=False)
-                        st.markdown("**All Holdings**")
                         st.dataframe(pdf.style.format({"Return (%)":"{:.2f}%","Weight (%)":"{:.2f}%","Contribution (%)":"{:.2f}%"})
                                      .background_gradient(subset=["Return (%)"], cmap="RdYlGn"),
                                      hide_index=True, use_container_width=True)
 
-                        # Risk metrics
                         st.subheader("⚠️ Risk Metrics")
                         var95 = np.percentile(sr, 5) * 100
                         if len(sector_holdings) > 1:
                             rdict = {}
                             for ticker, info in sector_holdings.items():
                                 if ticker in sector_data:
-                                    sd = sector_data[ticker]
-                                    sc = sd["Close"].iloc[:,0] if isinstance(sd["Close"],pd.DataFrame) else sd["Close"]
-                                    rdict[info["name"]] = sc.pct_change().dropna()
+                                    d  = sector_data[ticker]
+                                    cl = d["Close"].iloc[:,0] if isinstance(d["Close"],pd.DataFrame) else d["Close"]
+                                    rdict[info["name"]] = cl.pct_change().dropna()
                             corr_m = pd.DataFrame(rdict).corr()
                             c1, c2 = st.columns(2)
                             c1.metric("Value at Risk (95%)", f"{var95:.2f}%")
@@ -1640,7 +1534,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
             if st.button("📊 Generate Financial Analysis", type="primary", key=f"fin_gen_{sector_name}"):
                 try:
-                    with st.spinner(f"Fetching financial data…"):
+                    with st.spinner("Fetching financial data…"):
                         fin_rows = []
                         for ticker, info in sector_holdings.items():
                             try:
@@ -1656,10 +1550,11 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
                                 fin_rows.append({
                                     "Ticker": ticker, "Name": info["name"],
-                                    "Market Cap":        ti.get("marketCap"),
-                                    "P/E Ratio":         ti.get("trailingPE"),
-                                    "Forward P/E":       ti.get("forwardPE"),
-                                    "P/B Ratio":         ti.get("priceToBook"),
+                                    "Currency": info["currency"],
+                                    "Market Cap":         ti.get("marketCap"),
+                                    "P/E Ratio":          ti.get("trailingPE"),
+                                    "Forward P/E":        ti.get("forwardPE"),
+                                    "P/B Ratio":          ti.get("priceToBook"),
                                     "Dividend Yield (%)": (ti.get("dividendYield") or 0) * 100,
                                     "Profit Margin (%)":  (ti.get("profitMargins") or 0) * 100,
                                     "ROE (%)":            (ti.get("returnOnEquity") or 0) * 100,
@@ -1676,44 +1571,27 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     if fin_rows:
                         fin_df = pd.DataFrame(fin_rows)
                         st.subheader("📊 Key Financial Ratios")
-                        # ── Fetch true sector industry average from yfinance ──────────────
-                        # Map our sector names to yfinance industry/sector ETF or
-                        # use the sector field from yfinance .info to group peers
+
                         SECTOR_ETFS = {
-                            "TMT":           "XLK",
-                            "FIG":           "XLF",
-                            "Industrials":   "XLI",
-                            "PUI":           "XLB",
-                            "Consumer Goods":"XLP",
-                            "Healthcare":    "XLV",
-                            "Real Estate":   "XLRE",
-                            "Energy":        "XLE",
-                            "Utilities":     "XLU",
+                            "TMT":"XLK","FIG":"XLF","Industrials":"XLI","PUI":"XLB",
+                            "Consumer Goods":"XLP","Healthcare":"XLV",
+                            "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
                         }
-                        # Build industry averages from yfinance info of each holding's sector peers
-                        # We use the median of all portfolio companies' yfinance sector peers
-                        # fetched via their "industry" group — or fall back to the ETF constituents proxy
-                        # For simplicity: fetch ~10 large-cap peers for the sector ETF and average their ratios
+
                         @st.cache_data(show_spinner=False)
                         def fetch_sector_industry_avg(sector, ratio_cols):
-                            """
-                            Returns a dict of {ratio_col: industry_average} using yfinance
-                            info from the top holdings of the sector ETF as a proxy for
-                            the true sector average.
-                            """
                             etf_ticker = SECTOR_ETFS.get(sector, "SPY")
-                            # Representative large-cap tickers per sector as fallback proxies
                             SECTOR_PROXIES = {
-                                "XLK":  ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
-                                "XLF":  ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
-                                "XLI":  ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
-                                "XLB":  ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
-                                "XLP":  ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
-                                "XLV":  ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
-                                "XLRE": ["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
-                                "XLE":  ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
-                                "XLU":  ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
-                                "SPY":  ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
+                                "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
+                                "XLF": ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
+                                "XLI": ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
+                                "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
+                                "XLP": ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
+                                "XLV": ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
+                                "XLRE":["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
+                                "XLE": ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
+                                "XLU": ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
+                                "SPY": ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
                             }
                             proxies = SECTOR_PROXIES.get(etf_ticker, SECTOR_PROXIES["SPY"])
                             peer_vals = {col: [] for col in ratio_cols}
@@ -1721,25 +1599,24 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                 try:
                                     pi = yf.Ticker(pt).info
                                     mapping = {
-                                        "P/E Ratio":   pi.get("trailingPE"),
-                                        "P/B Ratio":   pi.get("priceToBook"),
-                                        "Debt/Equity": pi.get("debtToEquity"),
-                                        "OCF Ratio":   None,  # complex, skip for peers
-                                        "Forward P/E": pi.get("forwardPE"),
-                                        "Profit Margin (%)": (pi.get("profitMargins") or 0)*100,
-                                        "ROE (%)": (pi.get("returnOnEquity") or 0)*100,
-                                        "ROA (%)": (pi.get("returnOnAssets") or 0)*100,
+                                        "P/E Ratio":          pi.get("trailingPE"),
+                                        "P/B Ratio":          pi.get("priceToBook"),
+                                        "Debt/Equity":        pi.get("debtToEquity"),
+                                        "OCF Ratio":          None,
+                                        "Forward P/E":        pi.get("forwardPE"),
+                                        "Profit Margin (%)":  (pi.get("profitMargins") or 0)*100,
+                                        "ROE (%)":            (pi.get("returnOnEquity") or 0)*100,
+                                        "ROA (%)":            (pi.get("returnOnAssets") or 0)*100,
                                         "Dividend Yield (%)": (pi.get("dividendYield") or 0)*100,
                                         "Revenue Growth (%)": (pi.get("revenueGrowth") or 0)*100,
-                                        "Beta": pi.get("beta"),
-                                        "Current Ratio": pi.get("currentRatio"),
+                                        "Beta":               pi.get("beta"),
+                                        "Current Ratio":      pi.get("currentRatio"),
                                     }
                                     for col in ratio_cols:
                                         v = mapping.get(col)
                                         if v is not None:
                                             try:
                                                 fv = float(v)
-                                                # Sanity-filter extreme outliers
                                                 if col in ["P/E Ratio","Forward P/E"] and (fv < 0 or fv > 200): continue
                                                 if col == "Debt/Equity" and fv > 500: continue
                                                 peer_vals[col].append(fv)
@@ -1747,15 +1624,11 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                                 pass
                                 except Exception:
                                     pass
-                            result = {}
-                            for col, vals in peer_vals.items():
-                                if vals:
-                                    import statistics
-                                    result[col] = statistics.median(vals)
-                            return result
+                            import statistics
+                            return {col: statistics.median(vals) for col, vals in peer_vals.items() if vals}
 
                         with st.spinner("Fetching sector industry benchmarks…"):
-                            ind_avgs = fetch_sector_industry_avg(sector_name, 
+                            ind_avgs = fetch_sector_industry_avg(sector_name,
                                 ["P/E Ratio","P/B Ratio","Debt/Equity","OCF Ratio",
                                  "Forward P/E","Profit Margin (%)","ROE (%)","ROA (%)","Beta","Current Ratio"])
 
@@ -1765,8 +1638,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         for idx, (col, title) in enumerate(ratio_cfg):
                             cd = fin_df[["Name", col]].dropna()
                             if not cd.empty:
-                                # Use true industry median as benchmark line
-                                ind_avg = ind_avgs.get(col)
+                                ind_avg  = ind_avgs.get(col)
                                 port_avg = cd[col].mean()
                                 fig = go.Figure()
                                 fig.add_trace(go.Bar(x=cd["Name"], y=cd[col], name=title,
@@ -1804,15 +1676,15 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
             if sel_name:
                 sel_ticker = comp_opts[sel_name]
                 cinfo      = sector_holdings[sel_ticker]
+                ccy        = cinfo["currency"]
 
-                st.subheader(f"📊 {sel_name} ({sel_ticker})")
+                st.subheader(f"📊 {sel_name} ({sel_ticker}) — Native currency: {ccy}")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Sector",        cinfo["sector"])
-                c2.metric("Currency",      cinfo["currency"])
+                c2.metric("Currency",      ccy)
                 c3.metric("Quantity Held", f"{cinfo['quantity']:,}")
-                c4.metric("Avg Buy Price", f"{cinfo['purchase_price']:.2f}")
+                c4.metric(f"Avg Buy Price ({ccy})", f"{cinfo['purchase_price']:.2f}")
 
-                # ── Transaction history for this stock ───────────────────────
                 st.markdown("---")
                 st.subheader("📋 Transaction History for This Stock")
                 tx_stock = cinfo.get("_transactions", pd.DataFrame())
@@ -1822,7 +1694,6 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     st.dataframe(tx_display[["Date","Ticker","Action","Quantity"]],
                                  use_container_width=True, hide_index=True)
 
-                    # Mini waterfall of running position
                     tx_stock_sorted = tx_stock.sort_values("Date")
                     running = 0
                     dates_run, vals_run = [], []
@@ -1830,15 +1701,14 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         running += r["Quantity"] if r["Action"] == "Buy" else -r["Quantity"]
                         dates_run.append(r["Date"]); vals_run.append(running)
                     fig_tx = go.Figure(go.Scatter(x=dates_run, y=vals_run, mode="lines+markers",
-                                                  line=dict(color="#0F1D64", width=2),
-                                                  marker=dict(size=8)))
+                                                  line=dict(color="#0F1D64", width=2), marker=dict(size=8)))
                     fig_tx.update_layout(title="Running Net Position Over Time",
                                          xaxis_title="Date", yaxis_title="Net Shares Held",
                                          height=300, template="plotly_white")
                     st.plotly_chart(fig_tx, use_container_width=True)
 
                 st.markdown("---")
-                st.subheader("📈 Stock Price Analysis")
+                st.subheader(f"📈 Stock Price Analysis ({ccy})")
                 c1, c2 = st.columns(2)
                 pd_dt = pd.to_datetime(cinfo["purchase_date"])
                 with c1: chart_start = st.date_input("Chart Start Date", (pd_dt - pd.Timedelta(days=30)).date(), key=f"cs_{sel_ticker}")
@@ -1868,10 +1738,9 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                 cl = sd["Close"].iloc[:,0] if isinstance(sd["Close"],pd.DataFrame) else sd["Close"]
                                 fig = go.Figure()
                                 fig.add_trace(go.Scatter(x=cl.index, y=cl, mode="lines",
-                                                         name=f"{sel_ticker} Price",
-                                                         line=dict(color="#0F1D64",width=2)))
+                                                         name=f"{sel_ticker} Price ({ccy})",
+                                                         line=dict(color="#0F1D64", width=2)))
 
-                                # Mark ALL buy/sell transactions on the chart
                                 if not tx_stock.empty:
                                     for _, tr in tx_stock.iterrows():
                                         td = tr["Date"]
@@ -1889,67 +1758,75 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                                 ))
 
                                 if target_price and target_price > 0:
-                                    fig.add_shape(type="line",x0=0,x1=1,xref="paper",
-                                                  y0=target_price,y1=target_price,
-                                                  line=dict(color="red",width=2,dash="dash"))
-                                    fig.add_trace(go.Scatter(x=[None],y=[None],mode="lines",
-                                                             name=f"Target Price: {target_price:.2f}",
-                                                             line=dict(color="red",width=2,dash="dash"),showlegend=True))
+                                    fig.add_shape(type="line", x0=0, x1=1, xref="paper",
+                                                  y0=target_price, y1=target_price,
+                                                  line=dict(color="red", width=2, dash="dash"))
+                                    fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                                             name=f"Target Price: {target_price:.2f} {ccy}",
+                                                             line=dict(color="red", width=2, dash="dash"), showlegend=True))
 
-                                fig.update_layout(title=f"{sel_name} – Stock Price History",
-                                                  xaxis_title="Date", yaxis_title=f"Price ({cinfo['currency']})",
-                                                  hovermode="x unified", height=520, template="plotly_white",
-                                                  legend=dict(yanchor="top",y=0.99,xanchor="left",x=0.01))
-                                fig.update_xaxes(rangeslider_visible=True,
-                                                 rangeselector=dict(buttons=[
-                                                     dict(count=1,label="1M",step="month",stepmode="backward"),
-                                                     dict(count=3,label="3M",step="month",stepmode="backward"),
-                                                     dict(count=6,label="6M",step="month",stepmode="backward"),
-                                                     dict(count=1,label="1Y",step="year",stepmode="backward"),
-                                                     dict(step="all",label="All"),
-                                                 ]))
+                                fig.update_layout(
+                                    title=f"{sel_name} – Stock Price History ({ccy})",
+                                    xaxis_title="Date", yaxis_title=f"Price ({ccy})",
+                                    hovermode="x unified", height=520, template="plotly_white",
+                                    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+                                )
+                                fig.update_xaxes(rangeslider_visible=True, rangeselector=dict(buttons=[
+                                    dict(count=1,label="1M",step="month",stepmode="backward"),
+                                    dict(count=3,label="3M",step="month",stepmode="backward"),
+                                    dict(count=6,label="6M",step="month",stepmode="backward"),
+                                    dict(count=1,label="1Y",step="year",stepmode="backward"),
+                                    dict(step="all",label="All"),
+                                ]))
                                 st.plotly_chart(fig, use_container_width=True)
 
-                                cur_p = float(cl.iloc[-1])
-                                pp    = cinfo["purchase_price"]
-                                tr_   = ((cur_p - pp) / pp * 100) if pp > 0 else 0
+                                cur_p    = float(cl.iloc[-1])
+                                pp       = cinfo["purchase_price"]
+                                tr_      = ((cur_p - pp) / pp * 100) if pp > 0 else 0
+                                fx_spot  = _spot_fx(ccy, "USD")
 
                                 c1, c2, c3, c4 = st.columns(4)
-                                c1.metric("Current Price",   f"{cur_p:.2f} {cinfo['currency']}", delta=f"{tr_:.2f}%")
-                                c2.metric("Position Value",  f"{cur_p*cinfo['quantity']:,.2f} {cinfo['currency']}")
-                                c3.metric("Total Gain/Loss", f"{(cur_p-pp)*cinfo['quantity']:,.2f} {cinfo['currency']}", delta=f"{tr_:.2f}%")
+                                c1.metric(f"Current Price ({ccy})",   f"{cur_p:.2f}",
+                                          delta=f"{tr_:.2f}% vs avg buy")
+                                c1.metric("Current Price (USD)",       f"${cur_p * fx_spot:.2f}")
+                                c2.metric(f"Position Value ({ccy})",   f"{cur_p*cinfo['quantity']:,.2f}")
+                                c2.metric("Position Value (USD)",       f"${cur_p*cinfo['quantity']*fx_spot:,.0f}")
+                                c3.metric(f"Total Gain/Loss ({ccy})",   f"{(cur_p-pp)*cinfo['quantity']:,.2f}",
+                                          delta=f"{tr_:.2f}%")
+                                c3.metric("Total Gain/Loss (USD)",       f"${(cur_p-pp)*cinfo['quantity']*fx_spot:,.0f}")
                                 if target_price and target_price > 0:
                                     c4.metric("Upside to Target", f"{((target_price-cur_p)/cur_p*100):.2f}%",
-                                              delta=f"{target_price:.2f} target")
+                                              delta=f"{target_price:.2f} {ccy} target")
                                 else:
                                     c4.metric("Upside to Target", "N/A")
 
                                 st.markdown("---")
                                 st.subheader("🎯 Price Targets")
                                 c1, c2, c3, c4 = st.columns(4)
-                                c1.metric("Your Target Price",   f"{target_price:.2f} {cinfo['currency']}" if target_price else "Not Set")
-                                c2.metric("Analyst Consensus",   f"{an_target:.2f} {cinfo['currency']}" if an_target else "N/A")
-                                c3.metric("Number of Analysts",  an_count if an_target else "N/A")
-                                c4.metric("Recommendation",      an_rec)
+                                c1.metric(f"Your Target Price ({ccy})",   f"{target_price:.2f}" if target_price else "Not Set")
+                                c2.metric(f"Analyst Consensus ({ccy})",   f"{an_target:.2f}" if an_target else "N/A")
+                                c3.metric("Number of Analysts",           an_count if an_target else "N/A")
+                                c4.metric("Recommendation",               an_rec)
 
                                 st.markdown("---")
                                 st.subheader("💡 Investment Thesis")
-                                st.info(cinfo.get("thesis","No thesis available"))
+                                st.info(cinfo.get("thesis", "No thesis available"))
 
                                 st.markdown("---")
                                 st.subheader("💰 DCF Valuation Parameters")
                                 c1, c2 = st.columns(2)
                                 c1.write(f"**WACC:** {cinfo.get('WACC','N/A')}%")
                                 with c2:
-                                    st.write("**Cash Flow Projections:**")
+                                    st.write(f"**Cash Flow Projections ({ccy}):**")
                                     for i in range(1, 6):
                                         st.write(f"Year {i}: {cinfo.get(f'CF_{i}','N/A')}")
 
                         except Exception as e:
                             st.error(f"Error: {e}")
                             import traceback; st.code(traceback.format_exc())
+
 # =============================================================================
 # FOOTER
 # =============================================================================
 st.sidebar.markdown("---")
-st.sidebar.info("**Portfolio Dashboard v2.0**\n\nTransaction-history based portfolio tracking.")
+st.sidebar.info("**Portfolio Dashboard v2.1**\n\nAll non-USD positions correctly converted using live FX rates.")
