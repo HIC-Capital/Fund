@@ -1622,13 +1622,6 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                 hp.append({"Ticker":ticker,"Name":info["name"],"Return (%)":ret_,
                                            "Weight (%)":wt,"Contribution (%)":contrib})
                         pdf = pd.DataFrame(hp).sort_values("Return (%)", ascending=False)
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.markdown("**Best Performers**")
-                            st.dataframe(pdf.head(3).style.format({"Return (%)":"{:.2f}%","Weight (%)":"{:.2f}%","Contribution (%)":"{:.2f}%"}), hide_index=True)
-                        with c2:
-                            st.markdown("**Worst Performers**")
-                            st.dataframe(pdf.tail(3).style.format({"Return (%)":"{:.2f}%","Weight (%)":"{:.2f}%","Contribution (%)":"{:.2f}%"}), hide_index=True)
                         st.markdown("**All Holdings**")
                         st.dataframe(pdf.style.format({"Return (%)":"{:.2f}%","Weight (%)":"{:.2f}%","Contribution (%)":"{:.2f}%"})
                                      .background_gradient(subset=["Return (%)"], cmap="RdYlGn"),
