@@ -656,46 +656,114 @@ elif main_page == "Home":
 
                     with st.spinner("Calculating Sharpe, Alpha & Beta…"):
                         all_dates = msci_close.index
-                        portfolio_values = pd.Series(index=all_dates, dtype=float)
 
-                        for date in all_dates:
-                            daily_value = 0.0
-                            for ticker, info in portfolio_holdings.items():
-                                price_native = get_price_native(ticker, date, portfolio_data)
-                                if price_native is None:
-                                    continue
-                                # Convert native price → USD
-                                rate = get_rate_usd(info["currency"], date)
-                                daily_value += price_native * info["quantity"] * rate
-                            portfolio_values[date] = daily_value
+                        # ── Step 1: find the first date on which ANY position exists ──
+                        # This prevents the 0→value spike on the first trade date from
+                        # artificially collapsing volatility and inflating Sharpe.
+                        first_trade_date = pd.Timestamp(_tx["Date"].min()).normalize()
+                        # Use the first market date ON OR AFTER the first trade
+                        active_dates = all_dates[all_dates >= first_trade_date]
 
-                        port_ret = portfolio_values.pct_change().dropna()
-                        msci_ret = msci_close.pct_change().dropna()
-                        common   = port_ret.index.intersection(msci_ret.index)
-                        pr = port_ret.loc[common]; mr = msci_ret.loc[common]
-
-                        rf_daily = 0.02 / 252
-                        excess   = pr - rf_daily
-                        sharpe   = (excess.mean() / excess.std()) * np.sqrt(252) if excess.std() != 0 else 0
-
-                        from scipy import stats as scipy_stats
-                        reg_data = pd.DataFrame({"msci": mr, "portfolio": pr}).dropna()
-                        if len(reg_data) > 2:
-                            slope, intercept, *_ = scipy_stats.linregress(reg_data["msci"], reg_data["portfolio"])
-                            beta = slope; alpha_annual = (1 + intercept) ** 252 - 1
+                        if len(active_dates) < 10:
+                            st.warning("Not enough trading days after the first trade to compute reliable risk metrics.")
                         else:
-                            beta = alpha_annual = 0.0
+                            portfolio_values = pd.Series(index=active_dates, dtype=float)
 
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("Sharpe Ratio",         f"{sharpe:.2f}")
-                        c2.metric("Beta (vs MSCI World)", f"{beta:.2f}")
-                        c3.metric("Alpha (Annualized)",   f"{alpha_annual*100:.2f}%")
+                            for date in active_dates:
+                                daily_value = 0.0
+                                for ticker, info in portfolio_holdings.items():
+                                    price_native = get_price_native(ticker, date, portfolio_data)
+                                    if price_native is None:
+                                        continue
+                                    rate = get_rate_usd(info["currency"], date)
+                                    daily_value += price_native * info["quantity"] * rate
+                                portfolio_values[date] = daily_value
 
-                        st.info(f"""
-**Interpretation:**
-- **Sharpe Ratio ({sharpe:.2f})**: {'Excellent' if sharpe > 2 else 'Good' if sharpe > 1 else 'Moderate' if sharpe > 0 else 'Poor'} risk-adjusted performance
-- **Beta ({beta:.2f})**: Portfolio is {'more volatile than' if beta > 1 else 'less volatile than' if beta < 1 else 'as volatile as'} the market
-- **Alpha ({alpha_annual*100:.2f}%)**: {'Outperforming' if alpha_annual > 0 else 'Underperforming'} the benchmark by {abs(alpha_annual*100):.2f}% annually
+                            # ── Step 2: drop any leading zeros / NaNs before first real value ──
+                            # (safety net: if a position's data only starts mid-window)
+                            first_nonzero = portfolio_values[portfolio_values > 0].index.min()
+                            portfolio_values = portfolio_values.loc[first_nonzero:]
+
+                            # ── Step 3: daily returns (pct_change on equity value only) ──
+                            # Use ddof=1 (sample std), the standard for Sharpe ratio
+                            port_ret = portfolio_values.pct_change().dropna()
+
+                            # Sanity-check: warn if any single return is unrealistically large
+                            # (sign of a data gap or bad FX conversion)
+                            bad_ret = port_ret[port_ret.abs() > 0.25]
+                            if not bad_ret.empty:
+                                st.warning(
+                                    f"⚠️ {len(bad_ret)} daily return(s) exceed ±25% "
+                                    f"({bad_ret.index[0].date()} … {bad_ret.index[-1].date()}). "
+                                    "These may indicate FX gaps or data issues and are excluded from risk metrics."
+                                )
+                                port_ret = port_ret[port_ret.abs() <= 0.25]
+
+                            msci_ret = msci_close.pct_change().dropna()
+                            common   = port_ret.index.intersection(msci_ret.index)
+
+                            if len(common) < 10:
+                                st.warning("Too few overlapping trading days to compute reliable metrics.")
+                            else:
+                                pr = port_ret.loc[common]
+                                mr = msci_ret.loc[common]
+
+                                # ── Sharpe: annualised, sample std, rf = 2% pa ──────────────
+                                rf_daily = 0.02 / 252
+                                excess   = pr - rf_daily
+                                # ddof=1 is the correct sample standard deviation
+                                sharpe   = (excess.mean() / excess.std(ddof=1)) * np.sqrt(252) \
+                                           if excess.std(ddof=1) != 0 else 0
+
+                                # Annualised portfolio & benchmark volatility
+                                port_vol_ann = pr.std(ddof=1) * np.sqrt(252) * 100
+                                msci_vol_ann = mr.std(ddof=1) * np.sqrt(252) * 100
+
+                                # ── Beta & Jensen's Alpha via OLS ────────────────────────────
+                                from scipy import stats as scipy_stats
+                                reg_data = pd.DataFrame({"msci": mr, "portfolio": pr}).dropna()
+                                if len(reg_data) > 2:
+                                    slope, intercept, r_val, *_ = scipy_stats.linregress(
+                                        reg_data["msci"], reg_data["portfolio"]
+                                    )
+                                    beta = slope
+                                    # Jensen's alpha: annualise the daily intercept properly
+                                    # α_annual = intercept × 252  (linear approximation, standard practice)
+                                    alpha_annual = intercept * 252
+                                    r_squared    = r_val ** 2
+                                else:
+                                    beta = alpha_annual = r_squared = 0.0
+
+                                # ── Display ──────────────────────────────────────────────────
+                                n_days = len(pr)
+                                st.caption(
+                                    f"Computed over **{n_days} trading days** "
+                                    f"({pr.index[0].date()} → {pr.index[-1].date()}) "
+                                    f"starting from first trade. Risk-free rate: 2% p.a."
+                                )
+
+                                c1, c2, c3 = st.columns(3)
+                                c1.metric("Sharpe Ratio",         f"{sharpe:.2f}")
+                                c2.metric("Beta (vs MSCI World)", f"{beta:.2f}")
+                                c3.metric("Alpha (Annualized)",   f"{alpha_annual*100:.2f}%")
+
+                                c1, c2, c3 = st.columns(3)
+                                c1.metric("Portfolio Vol (Ann.)", f"{port_vol_ann:.1f}%")
+                                c2.metric("MSCI World Vol (Ann.)", f"{msci_vol_ann:.1f}%")
+                                c3.metric("R² (vs MSCI World)",   f"{r_squared:.2f}")
+
+                                def _sharpe_label(s):
+                                    if   s > 1.5: return "Good"
+                                    elif s > 0.5: return "Acceptable"
+                                    elif s > 0:   return "Poor"
+                                    else:         return "Negative"
+
+                                st.info(f"""
+**Interpretation ({n_days} days of live portfolio data):**
+- **Sharpe Ratio ({sharpe:.2f})**: {_sharpe_label(sharpe)} risk-adjusted return (>1 is good; >2 is rare and typically only seen over short bull runs)
+- **Beta ({beta:.2f})**: Portfolio is {'more volatile than' if beta > 1 else 'less volatile than' if beta < 1 else 'as volatile as'} the MSCI World
+- **Alpha ({alpha_annual*100:.2f}% p.a.)**: {'Outperforming' if alpha_annual > 0 else 'Underperforming'} the benchmark on a risk-adjusted basis
+- **R² ({r_squared:.2f})**: {r_squared*100:.0f}% of portfolio variance explained by MSCI World moves
 """)
 
                     st.markdown("---")
@@ -1422,8 +1490,13 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                             return _fx_rate_on_date(currency, date, fx_usd_s.get(currency), "USD")
 
                         all_dates = bm_close.index
-                        sec_vals  = pd.Series(index=all_dates, dtype=float)
-                        for date in all_dates:
+                        # Trim to active window: from the first sector trade onward
+                        sector_first_trade = pd.Timestamp(
+                            _tx[_tx["Ticker"].isin(sector_holdings.keys())]["Date"].min()
+                        ).normalize()
+                        active_sec_dates = all_dates[all_dates >= sector_first_trade]
+                        sec_vals  = pd.Series(index=active_sec_dates, dtype=float)
+                        for date in active_sec_dates:
                             dv = 0.0
                             for ticker, info in sector_holdings.items():
                                 p = get_price_s(ticker, date)
@@ -1431,7 +1504,14 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                 dv += p * info["quantity"] * get_rate_s(info["currency"], date)
                             sec_vals[date] = dv
 
+                        # Drop leading zeros in case first positions have missing price data
+                        first_nonzero_s = sec_vals[sec_vals > 0].index.min()
+                        sec_vals        = sec_vals.loc[first_nonzero_s:]
+
                         sec_ret = sec_vals.pct_change().dropna()
+                        # Exclude extreme single-day moves (>25%) — data gaps / FX spikes
+                        sec_ret = sec_ret[sec_ret.abs() <= 0.25]
+
                         bm_ret  = bm_close.pct_change().dropna()
                         common  = sec_ret.index.intersection(bm_ret.index)
                         sr = sec_ret.loc[common]; br = bm_ret.loc[common]
@@ -1441,20 +1521,21 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
                         rf    = 0.02/252
                         exc   = sr - rf
-                        sharpe = (exc.mean()/exc.std())*np.sqrt(252) if exc.std() != 0 else 0
+                        # ddof=1: sample standard deviation (standard for Sharpe)
+                        sharpe = (exc.mean()/exc.std(ddof=1))*np.sqrt(252) if exc.std(ddof=1) != 0 else 0
 
                         rd = pd.DataFrame({"bm":br,"sec":sr}).dropna()
                         if len(rd) > 2:
-                            sl, ic, *_ = scipy_stats.linregress(rd["bm"], rd["sec"])
-                            beta = sl; alpha_a = ic * 252
+                            sl, ic, r_val_s, *_ = scipy_stats.linregress(rd["bm"], rd["sec"])
+                            beta = sl; alpha_a = ic * 252   # Jensen's alpha: daily intercept × 252
                         else:
                             beta = alpha_a = 0.0
 
-                        vol_s = sr.std()*np.sqrt(252)*100
-                        vol_b = br.std()*np.sqrt(252)*100
+                        vol_s = sr.std(ddof=1)*np.sqrt(252)*100
+                        vol_b = br.std(ddof=1)*np.sqrt(252)*100
                         cum   = (1+sr).cumprod()
                         mdd   = ((cum - cum.expanding().max())/cum.expanding().max()).min()*100
-                        act   = sr - br; te = act.std()*np.sqrt(252)
+                        act   = sr - br; te = act.std(ddof=1)*np.sqrt(252)
                         ir    = (act.mean()*252)/te if te != 0 else 0
 
                         st.subheader("🎯 Key Performance Metrics (USD-based)")
