@@ -45,7 +45,7 @@ def load_data():
             if any(v in ["buy", "sell"] for v in vals):
                 raw = candidate
                 used_sheet = sname
-                print(f"Found transaction data in sheet: '{sname}'")
+                print(f"Found  data in sheet: '{sname}'")
                 break
         if raw is not None:
             break
@@ -59,15 +59,15 @@ def load_data():
     raw.columns = [str(c).strip() for c in raw.columns]
     col_lower   = {c.lower(): c for c in raw.columns}
 
-    # ── Identify the four core transaction columns ────────────────────────────
+    # ── Identify the four core  columns ────────────────────────────
     date_col   = next((col_lower[k] for k in ["date", "trade date", "tradedate"]           if k in col_lower), raw.columns[0])
     ticker_col = next((col_lower[k] for k in ["ticker", "security", "symbol", "stock"]     if k in col_lower), raw.columns[1])
     action_col = next((col_lower[k] for k in ["action", "type", "side", "buy/sell"]        if k in col_lower), raw.columns[2])
     qty_col    = next((col_lower[k] for k in ["shares", "quantity", "qty", "units", "volume"] if k in col_lower), raw.columns[3])
 
-    print(f"  Transaction columns detected → date='{date_col}' ticker='{ticker_col}' action='{action_col}' qty='{qty_col}'")
+    print(f"   columns detected → date='{date_col}' ticker='{ticker_col}' action='{action_col}' qty='{qty_col}'")
 
-    # ── Build clean transactions DataFrame ────────────────────────────────────
+    # ── Build clean s DataFrame ────────────────────────────────────
     tx = raw[[date_col, ticker_col, action_col, qty_col]].copy()
     tx.columns = ["Date", "Ticker", "Action", "Quantity"]
 
@@ -184,7 +184,7 @@ def load_data():
     info_df.index.name = "Ticker"
 
     # Print a summary so you can verify what was read
-    print(f"\nSheet: '{used_sheet}' | Transactions: {len(tx)} rows | Unique tickers: {len(info_df)}")
+    print(f"\nSheet: '{used_sheet}' | s: {len(tx)} rows | Unique tickers: {len(info_df)}")
     print(f"{'Ticker':<20} {'Currency':<8} {'Sector':<20} {'Thesis':<30}")
     print("-" * 80)
     for t in sorted(info_df.index):
@@ -196,7 +196,7 @@ def load_data():
 
 def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
     """
-    Compute current net positions from transaction history.
+    Compute current net positions from  history.
 
     info_df is indexed by ticker and has lowercase columns:
         name, target_price, currency, sector, thesis, wacc, cf_1..cf_5
@@ -255,7 +255,7 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
             "CF_3":           safe_str(row.get("cf_3", "")),
             "CF_4":           safe_str(row.get("cf_4", "")),
             "CF_5":           safe_str(row.get("cf_5", "")),
-            "_transactions":  grp.reset_index(drop=True),
+            "_s":  grp.reset_index(drop=True),
         }
 
     return portfolio
@@ -263,7 +263,7 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
 
 def _vwap_purchase_price(ticker: str, buys: pd.DataFrame) -> float:
     """
-    Weighted-average purchase price across all buy transactions.
+    Weighted-average purchase price across all buy s.
     Fetches the closing price on each buy date from yfinance.
     Returns 0.0 on failure.
     """
@@ -299,10 +299,10 @@ def _fetch_close_on_date(ticker: str, date: pd.Timestamp) -> float | None:
 
 
 # ── Load & build ──────────────────────────────────────────────────────────────
-print("Loading transaction history…")
+print("Loading  history…")
 _tx, _info_df = load_data()
 
-print("Building portfolio from transactions…")
+print("Building portfolio from s…")
 portfolio_holdings = build_portfolio(_tx, _info_df)
 
 print(f"Active positions: {list(portfolio_holdings.keys())}")
@@ -439,7 +439,8 @@ if st.sidebar.button("🏠 Home", use_container_width=True):
 
 if "main_page" not in st.session_state:
     st.session_state.main_page = "Home"
-
+if st.sidebar.button("📋 s",    use_container_width=True): st.session_state.main_page = "Transactions"
+    
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 
@@ -450,15 +451,10 @@ if st.sidebar.button("⚡ PUI",             use_container_width=True): st.sessio
 if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.session_state.main_page = "Consumer Goods Sector"
 if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "Healthcare Sector"
 
-st.sidebar.markdown("---")
-
-if st.sidebar.button("🔧 Adding Tool",     use_container_width=True): st.session_state.main_page = "Adding Tool"
-if st.sidebar.button("📋 Transactions",    use_container_width=True): st.session_state.main_page = "Transactions"
-
 main_page = st.session_state.main_page
 
 # =============================================================================
-# TRANSACTION HISTORY PAGE  (new)
+# TRANSACTION HISTORY PAGE
 # =============================================================================
 if main_page == "Transactions":
     st.title("📋 Transaction History")
