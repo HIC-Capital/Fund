@@ -454,6 +454,143 @@ def _spot_fx(currency: str, target: str = "USD") -> float:
 
 
 # =============================================================================
+# FINANCIAL ANALYSIS HELPERS  (module-level so @st.cache_data works correctly)
+# =============================================================================
+import statistics as _stats
+
+_SECTOR_ETFS = {
+    "TMT":"XLK","FIG":"XLF","Industrials":"XLI","PUI":"XLB",
+    "Consumer Goods":"XLP","Healthcare":"XLV",
+    "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
+}
+_SECTOR_PROXIES = {
+    "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
+    "XLF": ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
+    "XLI": ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
+    "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
+    "XLP": ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
+    "XLV": ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
+    "XLRE":["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
+    "XLE": ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
+    "XLU": ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
+    "SPY": ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
+}
+_ALL_RATIO_COLS = (
+    "P/E Ratio","P/B Ratio","Debt/Equity","OCF Ratio",
+    "Forward P/E","Profit Margin (%)","ROE (%)","ROA (%)","Beta","Current Ratio",
+)
+
+
+def _yf_info_with_retry(ticker: str, max_attempts: int = 4, base_delay: float = 3.0):
+    """
+    Fetch yfinance .info for *ticker* with exponential-backoff retry.
+    Returns (info_dict, error_str_or_None).
+
+    A fresh yf.Ticker() is created on every attempt so a rate-limited
+    session object is never reused.  A response is accepted only when at
+    least one of the core financial fields is actually populated — this
+    reliably distinguishes a real response from a rate-limit stub dict.
+    """
+    # Fields that yfinance always populates on a real (non-stub) response
+    CORE_FIELDS = ("marketCap", "trailingPE", "priceToBook",
+                   "returnOnEquity", "currentPrice", "regularMarketPrice")
+
+    for attempt in range(max_attempts):
+        try:
+            info = yf.Ticker(ticker).info   # fresh object every attempt
+            if info and any(info.get(f) is not None for f in CORE_FIELDS):
+                return info, None
+            raise ValueError(
+                f"Rate-limit stub returned — none of {CORE_FIELDS} populated "
+                f"({len(info)} keys total)"
+            )
+        except Exception as e:
+            err = str(e)
+            if attempt < max_attempts - 1:
+                wait = base_delay * (2 ** attempt)   # 3 s, 6 s, 12 s, 24 s
+                print(f"  {ticker} attempt {attempt+1} failed: {err} — waiting {wait:.0f}s")
+                time.sleep(wait)
+            else:
+                return {}, err
+    return {}, "Max retries exceeded"
+
+
+def _extract_ratios(ti: dict, cf_df=None, bs_df=None) -> dict:
+    """Pull the standard ratio set from a yfinance info dict."""
+    ocf_r = None
+    if cf_df is not None and bs_df is not None:
+        try:
+            if not cf_df.empty and not bs_df.empty:
+                ocf = cf_df.loc["Operating Cash Flow"].iloc[0] if "Operating Cash Flow" in cf_df.index else None
+                cl_ = bs_df.loc["Current Liabilities"].iloc[0]  if "Current Liabilities"  in bs_df.index else None
+                ocf_r = float(ocf) / float(cl_) if ocf is not None and cl_ and float(cl_) != 0 else None
+        except Exception:
+            pass
+    return {
+        "Market Cap":         ti.get("marketCap"),
+        "P/E Ratio":          ti.get("trailingPE"),
+        "Forward P/E":        ti.get("forwardPE"),
+        "P/B Ratio":          ti.get("priceToBook"),
+        "Dividend Yield (%)": (ti.get("dividendYield")   or 0) * 100,
+        "Profit Margin (%)":  (ti.get("profitMargins")   or 0) * 100,
+        "ROE (%)":            (ti.get("returnOnEquity")  or 0) * 100,
+        "ROA (%)":            (ti.get("returnOnAssets")  or 0) * 100,
+        "Debt/Equity":        ti.get("debtToEquity"),
+        "Current Ratio":      ti.get("currentRatio"),
+        "Revenue Growth (%)": (ti.get("revenueGrowth")   or 0) * 100,
+        "Beta":               ti.get("beta"),
+        "OCF Ratio":          ocf_r,
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_sector_industry_avg(sector: str) -> dict:
+    """
+    Fetch peer ratios for the sector with retry + inter-ticker delay.
+    Cached for 1 hour so repeated clicks don't re-hit the API.
+    @st.cache_data works here because the function is module-level (not a closure).
+    """
+    ratio_cols = list(_ALL_RATIO_COLS)
+    etf_ticker = _SECTOR_ETFS.get(sector, "SPY")
+    proxies    = _SECTOR_PROXIES.get(etf_ticker, _SECTOR_PROXIES["SPY"])
+    peer_vals  = {col: [] for col in ratio_cols}
+
+    for pt in proxies:
+        info, err = _yf_info_with_retry(pt, max_attempts=3, base_delay=2.0)
+        if err:
+            print(f"  peer {pt} failed: {err}")
+            continue
+        mapping = {
+            "P/E Ratio":          info.get("trailingPE"),
+            "P/B Ratio":          info.get("priceToBook"),
+            "Debt/Equity":        info.get("debtToEquity"),
+            "OCF Ratio":          None,
+            "Forward P/E":        info.get("forwardPE"),
+            "Profit Margin (%)":  (info.get("profitMargins")  or 0) * 100,
+            "ROE (%)":            (info.get("returnOnEquity") or 0) * 100,
+            "ROA (%)":            (info.get("returnOnAssets") or 0) * 100,
+            "Dividend Yield (%)": (info.get("dividendYield")  or 0) * 100,
+            "Revenue Growth (%)": (info.get("revenueGrowth")  or 0) * 100,
+            "Beta":               info.get("beta"),
+            "Current Ratio":      info.get("currentRatio"),
+        }
+        for col in ratio_cols:
+            v = mapping.get(col)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if col in ("P/E Ratio", "Forward P/E") and (fv < 0 or fv > 200): continue
+                if col == "Debt/Equity" and fv > 500: continue
+                peer_vals[col].append(fv)
+            except Exception:
+                pass
+        time.sleep(0.5)
+
+    return {col: _stats.median(vals) for col, vals in peer_vals.items() if vals}
+
+
+# =============================================================================
 # PAGE CONFIG & CUSTOM CSS
 # =============================================================================
 st.set_page_config(
@@ -1130,18 +1267,35 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 cur_prices = {}
                 co_info    = {}
                 for ticker, info in portfolio_holdings.items():
-                    try:
-                        tk   = yf.Ticker(ticker)
-                        hist = tk.history(period="1d")
-                        cur_prices[ticker] = float(hist["Close"].iloc[-1]) if not hist.empty else info["purchase_price"]
+                    # ── Current price (fresh Ticker per attempt) ──────────────
+                    price = None
+                    for _attempt in range(3):
                         try:
-                            tki = tk.info
-                            co_info[ticker] = {"market_cap": tki.get("marketCap", 0)}
+                            hist = yf.Ticker(ticker).history(period="2d")
+                            if not hist.empty:
+                                price = float(hist["Close"].iloc[-1])
+                                break
                         except Exception:
-                            co_info[ticker] = {"market_cap": 0}
-                    except Exception:
-                        cur_prices[ticker] = info["purchase_price"]
-                        co_info[ticker]    = {"market_cap": 0}
+                            time.sleep(2 ** _attempt)
+                    cur_prices[ticker] = price if price is not None else info["purchase_price"]
+
+                    # ── Market cap — fresh Ticker each attempt ────────────────
+                    # fast_info.market_cap is the most reliable lightweight source;
+                    # fall through to full .info if it returns None/0.
+                    mc = 0
+                    for _attempt in range(3):
+                        try:
+                            fi_mc = getattr(yf.Ticker(ticker).fast_info, "market_cap", None)
+                            if fi_mc and fi_mc > 0:
+                                mc = fi_mc
+                                break
+                            full_mc = yf.Ticker(ticker).info.get("marketCap") or 0
+                            if full_mc > 0:
+                                mc = full_mc
+                                break
+                        except Exception:
+                            time.sleep(2 ** _attempt)
+                    co_info[ticker] = {"market_cap": mc}
 
             def classify_mc(mc):
                 if mc == 0:      return "Unknown"
@@ -1174,29 +1328,46 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                         "weight_eq":   0.0,
                     })
 
-            # ── Reconstruct current cash position ────────────────────────────
-            # Replay all transactions at their historical prices to get cash balance
-            # This mirrors the NAV calculation in Generic Summary
+            # ── Reconstruct current cash position ─────────────────────────────
+            # Replay every trade using:
+            #   - the actual closing price on the trade date
+            #   - the FX rate on THAT trade date (not today's spot)
+            # This mirrors the Generic Summary NAV loop exactly.
             FUND_SIZE_USD = 1_000_000.0
             cash_usd      = FUND_SIZE_USD
             all_tx_sorted = _tx.sort_values("Date").reset_index(drop=True)
 
-            for _, tx_row in all_tx_sorted.iterrows():
-                t      = tx_row["Ticker"]
-                qty    = int(tx_row["Quantity"])
-                action = tx_row["Action"]
-                trade_date = tx_row["Date"]
-                # Use stored purchase_price (native) as best approximation of exec price
-                # This is the same fallback used in the NAV loop
-                pp_native = portfolio_holdings.get(t, {}).get("purchase_price", 0.0)
-                ccy       = portfolio_holdings.get(t, {}).get("currency", "USD")
-                pp_usd    = pp_native * _spot_fx(ccy, "USD")
-                if action == "Buy":
-                    cash_usd -= pp_usd * qty
-                elif action == "Sell":
-                    cash_usd += pp_usd * qty
+            # Pre-fetch FX series for every currency used, covering the full trade window
+            tx_start = all_tx_sorted["Date"].min()
+            tx_end   = pd.Timestamp.today()
+            used_ccys = {portfolio_holdings.get(t, {}).get("currency", "USD")
+                         for t in all_tx_sorted["Ticker"].unique()}
+            fx_series_struct = {
+                ccy: _fetch_fx_series(ccy, tx_start, tx_end, "USD")
+                for ccy in used_ccys
+            }
 
-            # Guard against negative cash (rounding / price approximation artefacts)
+            for _, tx_row in all_tx_sorted.iterrows():
+                t          = tx_row["Ticker"]
+                qty        = int(tx_row["Quantity"])
+                action     = tx_row["Action"]
+                trade_date = tx_row["Date"]
+                ccy        = portfolio_holdings.get(t, {}).get("currency", "USD")
+
+                # Actual closing price on the trade date (same as Generic Summary)
+                price_native = _fetch_close_on_date(t, trade_date)
+                if price_native is None:
+                    price_native = portfolio_holdings.get(t, {}).get("purchase_price", 0.0)
+
+                # FX rate on that exact trade date — not today's spot
+                fx_rate   = _fx_rate_on_date(ccy, trade_date, fx_series_struct.get(ccy), "USD")
+                price_usd = price_native * fx_rate
+
+                if action == "Buy":
+                    cash_usd -= price_usd * qty
+                elif action == "Sell":
+                    cash_usd += price_usd * qty
+
             cash_usd = max(cash_usd, 0.0)
 
             # Full fund NAV = equity + cash (same denominator as Generic Summary)
@@ -1752,152 +1923,32 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
         # ── Financial Analysis ───────────────────────────────────────────────
         elif sector_tab == "Financial Analysis":
             st.header(f"💰 {sector_name} - Financial Analysis")
-
-            # ── Shared helpers (defined once, used for both portfolio & peers) ──
-            import time, statistics as _stats
-
-            SECTOR_ETFS = {
-                "TMT":"XLK","FIG":"XLF","Industrials":"XLI","PUI":"XLB",
-                "Consumer Goods":"XLP","Healthcare":"XLV",
-                "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
-            }
-            SECTOR_PROXIES = {
-                "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
-                "XLF": ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
-                "XLI": ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
-                "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
-                "XLP": ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
-                "XLV": ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
-                "XLRE":["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
-                "XLE": ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
-                "XLU": ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
-                "SPY": ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
-            }
-            ALL_RATIO_COLS = [
-                "P/E Ratio","P/B Ratio","Debt/Equity","OCF Ratio",
-                "Forward P/E","Profit Margin (%)","ROE (%)","ROA (%)","Beta","Current Ratio",
-            ]
-
-            def _yf_info_with_retry(ticker, max_attempts=4, base_delay=3.0):
-                """
-                Fetch yfinance .info for *ticker* with exponential-backoff retry.
-                Returns (info_dict, error_str_or_None).
-                """
-                for attempt in range(max_attempts):
-                    try:
-                        info = yf.Ticker(ticker).info
-                        # yfinance sometimes returns an empty / stub dict on rate-limit
-                        if info and len(info) > 5:
-                            return info, None
-                        # treat stub as a soft failure → retry
-                        raise ValueError("Empty info dict returned")
-                    except Exception as e:
-                        err = str(e)
-                        if attempt < max_attempts - 1:
-                            wait = base_delay * (2 ** attempt)   # 3 s, 6 s, 12 s …
-                            time.sleep(wait)
-                        else:
-                            return {}, err
-                return {}, "Max retries exceeded"
-
-            def _extract_ratios(ti, cf_df=None, bs_df=None):
-                """Pull the standard ratio set from a yfinance info dict."""
-                ocf_r = None
-                if cf_df is not None and bs_df is not None:
-                    try:
-                        if not cf_df.empty and not bs_df.empty:
-                            ocf = cf_df.loc["Operating Cash Flow"].iloc[0] if "Operating Cash Flow" in cf_df.index else None
-                            cl_ = bs_df.loc["Current Liabilities"].iloc[0]  if "Current Liabilities"  in bs_df.index else None
-                            ocf_r = ocf / cl_ if ocf is not None and cl_ and cl_ != 0 else None
-                    except Exception:
-                        pass
-                return {
-                    "Market Cap":         ti.get("marketCap"),
-                    "P/E Ratio":          ti.get("trailingPE"),
-                    "Forward P/E":        ti.get("forwardPE"),
-                    "P/B Ratio":          ti.get("priceToBook"),
-                    "Dividend Yield (%)": (ti.get("dividendYield")   or 0) * 100,
-                    "Profit Margin (%)":  (ti.get("profitMargins")   or 0) * 100,
-                    "ROE (%)":            (ti.get("returnOnEquity")  or 0) * 100,
-                    "ROA (%)":            (ti.get("returnOnAssets")  or 0) * 100,
-                    "Debt/Equity":        ti.get("debtToEquity"),
-                    "Current Ratio":      ti.get("currentRatio"),
-                    "Revenue Growth (%)": (ti.get("revenueGrowth")   or 0) * 100,
-                    "Beta":               ti.get("beta"),
-                    "OCF Ratio":          ocf_r,
-                }
-
-            @st.cache_data(show_spinner=False)
-            def fetch_sector_industry_avg(sector, ratio_cols_tuple):
-                """
-                Fetch peer ratios for the sector with retry + inter-ticker delay.
-                Cached so repeated clicks don't re-hit the API.
-                """
-                ratio_cols = list(ratio_cols_tuple)
-                etf_ticker = SECTOR_ETFS.get(sector, "SPY")
-                proxies    = SECTOR_PROXIES.get(etf_ticker, SECTOR_PROXIES["SPY"])
-                peer_vals  = {col: [] for col in ratio_cols}
-
-                for pt in proxies:
-                    info, err = _yf_info_with_retry(pt, max_attempts=3, base_delay=2.0)
-                    if err:
-                        continue   # silently skip failed peers — we have 10 per sector
-                    mapping = {
-                        "P/E Ratio":          info.get("trailingPE"),
-                        "P/B Ratio":          info.get("priceToBook"),
-                        "Debt/Equity":        info.get("debtToEquity"),
-                        "OCF Ratio":          None,
-                        "Forward P/E":        info.get("forwardPE"),
-                        "Profit Margin (%)":  (info.get("profitMargins")  or 0) * 100,
-                        "ROE (%)":            (info.get("returnOnEquity") or 0) * 100,
-                        "ROA (%)":            (info.get("returnOnAssets") or 0) * 100,
-                        "Dividend Yield (%)": (info.get("dividendYield")  or 0) * 100,
-                        "Revenue Growth (%)": (info.get("revenueGrowth")  or 0) * 100,
-                        "Beta":               info.get("beta"),
-                        "Current Ratio":      info.get("currentRatio"),
-                    }
-                    for col in ratio_cols:
-                        v = mapping.get(col)
-                        if v is None:
-                            continue
-                        try:
-                            fv = float(v)
-                            if col in ("P/E Ratio", "Forward P/E") and (fv < 0 or fv > 200): continue
-                            if col == "Debt/Equity" and fv > 500: continue
-                            peer_vals[col].append(fv)
-                        except Exception:
-                            pass
-                    time.sleep(0.5)   # gentle inter-ticker pause for peers
-
-                return {col: _stats.median(vals) for col, vals in peer_vals.items() if vals}
+            # Helpers (_yf_info_with_retry, _extract_ratios, fetch_sector_industry_avg)
+            # are defined at module level so @st.cache_data works correctly.
 
             if st.button("📊 Generate Financial Analysis", type="primary", key=f"fin_gen_{sector_name}"):
 
-                # ── 1. Fetch portfolio holdings data with retry ───────────────
                 fin_rows  = []
                 failed_tx = []
                 status_ph = st.empty()
-
                 tickers_list = list(sector_holdings.items())
+
                 for i, (ticker, info) in enumerate(tickers_list):
                     status_ph.info(f"⏳ Fetching data for **{ticker}** ({i+1}/{len(tickers_list)})…")
                     ti, err = _yf_info_with_retry(ticker, max_attempts=4, base_delay=3.0)
 
                     if err:
-                        failed_tx.append((ticker, err))
-                        # Try one more time after a longer pause before giving up
-                        status_ph.warning(f"⚠️ Rate-limited on {ticker}, waiting 10 s before retry…")
-                        time.sleep(10)
-                        ti, err2 = _yf_info_with_retry(ticker, max_attempts=2, base_delay=5.0)
+                        # One final attempt after a longer cool-down
+                        status_ph.warning(f"⚠️ Rate-limited on {ticker}, waiting 15 s then retrying…")
+                        time.sleep(15)
+                        ti, err2 = _yf_info_with_retry(ticker, max_attempts=3, base_delay=5.0)
                         if err2:
-                            failed_tx[-1] = (ticker, err2)   # update with latest error
-                            status_ph.warning(f"⚠️ Could not retrieve **{ticker}** — skipping. Will still appear in industry average.")
+                            failed_tx.append((ticker, err2))
+                            status_ph.warning(f"⚠️ Skipping **{ticker}** after repeated failures.")
                             time.sleep(1)
                             continue
-                        else:
-                            failed_tx.pop()   # recovered
 
-                    # Fetch cashflow & balance sheet (secondary — failure is OK)
+                    # Cashflow & balance sheet for OCF ratio (failure is non-fatal)
                     cf_df = bs_df = None
                     try:
                         tk    = yf.Ticker(ticker)
@@ -1909,7 +1960,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     row = {"Ticker": ticker, "Name": info["name"], "Currency": info["currency"]}
                     row.update(_extract_ratios(ti, cf_df, bs_df))
                     fin_rows.append(row)
-                    time.sleep(0.8)   # polite inter-ticker pause
+                    time.sleep(1.0)   # polite inter-ticker pause
 
                 status_ph.empty()
 
@@ -1917,22 +1968,19 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     names = ", ".join(t for t, _ in failed_tx)
                     st.warning(
                         f"⚠️ Could not retrieve data for **{names}** (rate-limited). "
-                        "Their data is excluded from the portfolio bars but the "
-                        "**industry benchmark line still uses the full peer set**."
+                        "Their bars are omitted but the **industry benchmark still uses the full peer set**."
                     )
 
                 if not fin_rows:
-                    st.error("No financial data could be retrieved for any holding. Please wait a minute and try again.")
+                    st.error("No financial data could be retrieved. Please wait a minute and try again.")
                     st.stop()
 
                 fin_df = pd.DataFrame(fin_rows)
                 st.success(f"✅ Retrieved data for {len(fin_rows)}/{len(tickers_list)} holdings.")
 
-                # ── 2. Fetch industry average (cached, with retry built-in) ──
-                with st.spinner("Fetching sector industry benchmarks (this is cached after first run)…"):
-                    ind_avgs = fetch_sector_industry_avg(
-                        sector_name, tuple(ALL_RATIO_COLS)
-                    )
+                # Industry average — module-level cached function (1 h TTL)
+                with st.spinner("Fetching sector industry benchmarks (cached for 1 h)…"):
+                    ind_avgs = fetch_sector_industry_avg(sector_name)
 
                 # ── 3. Charts ─────────────────────────────────────────────────
                 st.subheader("📊 Key Financial Ratios")
