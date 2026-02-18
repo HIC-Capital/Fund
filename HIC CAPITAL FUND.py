@@ -439,7 +439,7 @@ if st.sidebar.button("🏠 Home", use_container_width=True):
 
 if "main_page" not in st.session_state:
     st.session_state.main_page = "Home"
-if st.sidebar.button("📋 s",    use_container_width=True): st.session_state.main_page = "Transactions"
+if st.sidebar.button("📋 transactions",    use_container_width=True): st.session_state.main_page = "Transactions"
     
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
