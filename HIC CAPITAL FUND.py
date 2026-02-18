@@ -1052,10 +1052,11 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
         try:
             with st.spinner("Loading portfolio structure…"):
-                # Use spot CHF rates for structure page (shows CHF totals)
-                spot_chf_rates = {}
+                # ── Convert everything to USD — same basis as Generic Summary ──
+                # Spot native→USD rates (single value per currency, for current snapshot)
+                spot_usd_rates = {}
                 for ccy in {info["currency"] for info in portfolio_holdings.values()}:
-                    spot_chf_rates[ccy] = _spot_fx(ccy, "CHF")
+                    spot_usd_rates[ccy] = _spot_fx(ccy, "USD")
 
                 cur_prices = {}
                 co_info    = {}
@@ -1079,43 +1080,102 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 elif mc >= 2e9:  return "Mid"
                 else:            return "Small"
 
+            # ── Build equity values in USD ────────────────────────────────────
             holdings_analysis = []
-            total_chf = 0.0
+            total_equity_usd  = 0.0
             for ticker, info in portfolio_holdings.items():
                 if ticker in cur_prices:
-                    # price is in native currency; convert to CHF
-                    fx   = spot_chf_rates.get(info["currency"], FALLBACK_FX_TO_CHF.get(info["currency"], 1.0))
-                    val  = cur_prices[ticker] * info["quantity"] * fx
-                    total_chf += val
+                    fx_to_usd = spot_usd_rates.get(info["currency"], FALLBACK_FX_TO_USD.get(info["currency"], 1.0))
+                    val_usd   = cur_prices[ticker] * info["quantity"] * fx_to_usd
+                    total_equity_usd += val_usd
                     country = country_mapping.get(ticker) or "United States"
                     holdings_analysis.append({
-                        "ticker": ticker, "name": info["name"], "sector": info["sector"],
-                        "country": country, "country_iso": country_iso.get(country, ""),
-                        "region": region_mapping.get(country, "Unknown"),
-                        "market_cap": classify_mc(co_info.get(ticker, {}).get("market_cap", 0)),
-                        "currency": info["currency"], "value_chf": val, "weight": 0,
+                        "ticker":      ticker,
+                        "name":        info["name"],
+                        "sector":      info["sector"],
+                        "country":     country,
+                        "country_iso": country_iso.get(country, ""),
+                        "region":      region_mapping.get(country, "Unknown"),
+                        "market_cap":  classify_mc(co_info.get(ticker, {}).get("market_cap", 0)),
+                        "currency":    info["currency"],
+                        "value_usd":   val_usd,
+                        # weight vs full fund NAV (equity + cash) — matches Generic Summary
+                        "weight_nav":  0.0,
+                        # weight vs equity-only — useful for sector/geo breakdown
+                        "weight_eq":   0.0,
                     })
 
+            # ── Reconstruct current cash position ────────────────────────────
+            # Replay all transactions at their historical prices to get cash balance
+            # This mirrors the NAV calculation in Generic Summary
+            FUND_SIZE_USD = 1_000_000.0
+            cash_usd      = FUND_SIZE_USD
+            all_tx_sorted = _tx.sort_values("Date").reset_index(drop=True)
+
+            for _, tx_row in all_tx_sorted.iterrows():
+                t      = tx_row["Ticker"]
+                qty    = int(tx_row["Quantity"])
+                action = tx_row["Action"]
+                trade_date = tx_row["Date"]
+                # Use stored purchase_price (native) as best approximation of exec price
+                # This is the same fallback used in the NAV loop
+                pp_native = portfolio_holdings.get(t, {}).get("purchase_price", 0.0)
+                ccy       = portfolio_holdings.get(t, {}).get("currency", "USD")
+                pp_usd    = pp_native * _spot_fx(ccy, "USD")
+                if action == "Buy":
+                    cash_usd -= pp_usd * qty
+                elif action == "Sell":
+                    cash_usd += pp_usd * qty
+
+            # Guard against negative cash (rounding / price approximation artefacts)
+            cash_usd = max(cash_usd, 0.0)
+
+            # Full fund NAV = equity + cash (same denominator as Generic Summary)
+            total_nav_usd = total_equity_usd + cash_usd
+
+            # Populate weights
             for h in holdings_analysis:
-                h["weight"] = h["value_chf"] / total_chf * 100 if total_chf > 0 else 0
+                h["weight_nav"] = h["value_usd"] / total_nav_usd  * 100 if total_nav_usd  > 0 else 0
+                h["weight_eq"]  = h["value_usd"] / total_equity_usd * 100 if total_equity_usd > 0 else 0
+
+            # Use NAV-based weight throughout so it matches Generic Summary
+            for h in holdings_analysis:
+                h["weight"] = h["weight_nav"]
 
             df_an = pd.DataFrame(holdings_analysis)
             blue  = ["#0F1D64","#1E3A8A","#3B82F6","#60A5FA","#93C5FD","#DBEAFE"]
 
+            # ── Summary metrics banner ────────────────────────────────────────
+            cash_pct   = cash_usd / total_nav_usd * 100 if total_nav_usd > 0 else 0
+            equity_pct = total_equity_usd / total_nav_usd * 100 if total_nav_usd > 0 else 0
+            st.info(
+                f"**Fund NAV: ${total_nav_usd:,.0f} USD** — "
+                f"Equity: ${total_equity_usd:,.0f} ({equity_pct:.1f}%) · "
+                f"Cash: ${cash_usd:,.0f} ({cash_pct:.1f}%)\n"
+                f"*Weights below are vs full NAV (equity + cash), consistent with Generic Summary.*"
+            )
+
             st.subheader("📊 Sector Distribution")
-            sec_alloc = df_an.groupby("sector")["weight"].sum().reset_index()
-            sec_alloc.columns = ["Sector","Weight (%)"]
+            # Include cash as its own "sector" so weights sum to 100% of NAV
+            sec_data = df_an.groupby("sector")["weight"].sum().reset_index()
+            sec_data.columns = ["Sector","Weight (%)"]
+            if cash_pct > 0:
+                sec_data = pd.concat([
+                    sec_data,
+                    pd.DataFrame([{"Sector": "Cash (USD)", "Weight (%)": cash_pct}])
+                ], ignore_index=True)
+
             c1, c2 = st.columns([2,1])
             with c1:
-                fig_s = px.pie(sec_alloc, values="Weight (%)", names="Sector",
-                               title="Portfolio Allocation by Sector",
+                fig_s = px.pie(sec_data, values="Weight (%)", names="Sector",
+                               title="Portfolio Allocation by Sector (% of NAV, USD)",
                                color_discrete_sequence=blue, hole=0.4)
                 fig_s.update_traces(textposition="inside", textinfo="percent+label")
                 fig_s.update_layout(height=400)
                 st.plotly_chart(fig_s, use_container_width=True)
             with c2:
                 st.markdown("### Sector Breakdown")
-                for _, r in sec_alloc.sort_values("Weight (%)", ascending=False).iterrows():
+                for _, r in sec_data.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Sector"], f"{r['Weight (%)']:.1f}%")
 
             st.subheader("🌍 Geographical Distribution")
@@ -1128,7 +1188,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                         hover_data={"ISO":False,"Weight (%)":":.2f"},
                                         color_continuous_scale=[[0,"#DBEAFE"],[0.25,"#93C5FD"],
                                                                  [0.5,"#60A5FA"],[0.75,"#3B82F6"],[1,"#0F1D64"]],
-                                        title="Geographic Distribution (CHF-weighted)")
+                                        title="Geographic Distribution (% of NAV, USD)")
                 fig_map.update_geos(showcountries=True, countrycolor="lightgray",
                                     showcoastlines=True, projection_type="natural earth")
                 fig_map.update_layout(height=450, margin=dict(l=0,r=0,t=40,b=0))
@@ -1150,15 +1210,25 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 mc_alloc = df_an.groupby("market_cap")["weight"].sum().reset_index()
                 mc_alloc.columns = ["Market Cap","Weight (%)"]
                 fig_mc = px.bar(mc_alloc, x="Market Cap", y="Weight (%)",
-                                title="Market Cap Distribution", color="Weight (%)",
+                                title="Market Cap Distribution (% of NAV)", color="Weight (%)",
                                 color_continuous_scale=[[0,"#DBEAFE"],[0.5,"#3B82F6"],[1,"#0F1D64"]])
                 fig_mc.update_layout(height=350, showlegend=False)
                 st.plotly_chart(fig_mc, use_container_width=True)
             with c2:
-                cur_alloc = df_an.groupby("currency")["weight"].sum().reset_index()
-                cur_alloc.columns = ["Currency","Weight (%)"]
-                fig_cur = px.pie(cur_alloc, values="Weight (%)", names="Currency",
-                                 title="Native Currency Exposure",
+                # Currency exposure: show both native ccy and add USD cash
+                cur_data = df_an.groupby("currency")["weight"].sum().reset_index()
+                cur_data.columns = ["Currency","Weight (%)"]
+                # Add cash as USD exposure
+                existing_usd = cur_data.loc[cur_data["Currency"]=="USD","Weight (%)"].sum()
+                if existing_usd > 0:
+                    cur_data.loc[cur_data["Currency"]=="USD","Weight (%)"] += cash_pct
+                else:
+                    cur_data = pd.concat([
+                        cur_data,
+                        pd.DataFrame([{"Currency":"USD (cash)","Weight (%)": cash_pct}])
+                    ], ignore_index=True)
+                fig_cur = px.pie(cur_data, values="Weight (%)", names="Currency",
+                                 title="Currency Exposure incl. Cash (% of NAV)",
                                  color_discrete_sequence=blue)
                 fig_cur.update_traces(textposition="inside", textinfo="percent+label")
                 fig_cur.update_layout(height=350)
@@ -1170,22 +1240,23 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             top10_conc = df_sorted.head(10)["weight"].sum()
             hhi        = (df_an["weight"] ** 2).sum()
             c1, c2, c3 = st.columns(3)
-            c1.metric("Top 5 Holdings",  f"{top5_conc:.1f}%")
-            c2.metric("Top 10 Holdings", f"{top10_conc:.1f}%")
+            c1.metric("Top 5 Holdings",  f"{top5_conc:.1f}% of NAV")
+            c2.metric("Top 10 Holdings", f"{top10_conc:.1f}% of NAV")
             with c3:
-                st.metric("HHI Index", f"{hhi:.0f}")
+                st.metric("HHI Index (equity only)", f"{hhi:.0f}")
                 st.caption("✅ Well diversified" if hhi < 1000 else "⚠️ Moderately concentrated" if hhi < 1800 else "🔴 Highly concentrated")
 
-            st.markdown("### Top 10 Holdings by Weight")
-            th = df_sorted[["name","sector","country","currency","weight"]].head(10).copy()
-            th.columns = ["Company","Sector","Country","Native Ccy","Weight (%)"]
-            th["Weight (%)"] = th["Weight (%)"].apply(lambda x: f"{x:.2f}%")
+            st.markdown("### Top 10 Holdings by Weight (% of NAV)")
+            th = df_sorted[["name","sector","country","currency","value_usd","weight"]].head(10).copy()
+            th["value_usd"] = th["value_usd"].apply(lambda x: f"${x:,.0f}")
+            th["weight"]    = th["weight"].apply(lambda x: f"{x:.2f}%")
+            th.columns = ["Company","Sector","Country","Native Ccy","Value (USD)","Weight (% NAV)"]
             st.dataframe(th, use_container_width=True, hide_index=True)
 
-            st.subheader("📋 Portfolio Summary (CHF)")
+            st.subheader("📋 Portfolio Summary (USD)")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Holdings",  len(df_an))
-            c2.metric("Total Value",     f"CHF {total_chf:,.2f}")
+            c2.metric("Fund NAV (USD)",  f"${total_nav_usd:,.0f}")
             c3.metric("Sectors Covered", df_an["sector"].nunique())
             c4.metric("Countries",       df_an["country"].nunique())
 
