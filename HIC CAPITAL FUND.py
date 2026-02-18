@@ -178,10 +178,6 @@ def load_data():
         return None
 
     # ── Currency resolution via yfinance with disk cache ──────────────────────
-    # Currencies are fetched from yfinance and stored in currency_cache.json.
-    # On every boot the file is read first so yfinance is only called for tickers
-    # not yet in the file, or whose cached entry is marked as failed.
-    # This means a rate-limit on one boot never permanently poisons the value.
     yf_currencies = _resolve_currencies(list(unique_tickers))
 
     INFO_DEFAULTS["currency"] = lambda t: yf_currencies.get(t, "USD")
@@ -235,7 +231,7 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
         if yf_ticker in info_df.index:
             row = info_df.loc[yf_ticker]
         else:
-            st.warning(f"⚠️ No static info for **{yf_ticker}** – using defaults.")
+            st.warning(f" No static info for **{yf_ticker}** – using defaults.")
             row = pd.Series({
                 "name": yf_ticker, "target_price": 0.0, "currency": "USD",
                 "sector": "Unknown", "thesis": "", "wacc": "",
@@ -243,7 +239,6 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
             })
 
         first_buy_date = buys["Date"].min()
-        # purchase_price is stored in NATIVE currency (e.g. INR for Indian stocks)
         purchase_price = _vwap_purchase_price(yf_ticker, buys)
 
         def safe_float(val, default=0.0):
@@ -257,11 +252,9 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
             "quantity":       net_qty,
             "name":           safe_str(row.get("name", yf_ticker), yf_ticker),
             "Target_price":   safe_float(row.get("target_price", 0.0)),
-            # native currency of the stock (e.g. "INR" for Bharti Airtel)
             "currency":       safe_str(row.get("currency", "USD"), "USD"),
             "sector":         safe_str(row.get("sector", "Unknown"), "Unknown"),
             "purchase_date":  first_buy_date.strftime("%Y-%m-%d"),
-            # stored in NATIVE currency — always convert before mixing with USD values
             "purchase_price": purchase_price,
             "thesis":         safe_str(row.get("thesis", "")),
             "WACC":           safe_str(row.get("wacc", "")),
@@ -317,9 +310,8 @@ print(f"Active positions: {list(portfolio_holdings.keys())}")
 # FX UTILITIES  (everything converts TO USD as the fund's base currency)
 # =============================================================================
 
-# Known native→USD yfinance pairs.  Missing ones are constructed dynamically.
 NATIVE_TO_USD_PAIRS = {
-    "USD": None,        # no conversion needed
+    "USD": None,
     "EUR": "EURUSD=X",
     "GBP": "GBPUSD=X",
     "JPY": "JPYUSD=X",
@@ -338,7 +330,6 @@ NATIVE_TO_USD_PAIRS = {
     "MXN": "MXNUSD=X",
 }
 
-# Fallback spot rates → USD (used when yfinance download fails)
 FALLBACK_FX_TO_USD = {
     "USD": 1.0000,
     "EUR": 1.0850,
@@ -359,7 +350,6 @@ FALLBACK_FX_TO_USD = {
     "MXN": 0.0580,
 }
 
-# Also keep CHF pairs for the "Portfolio Structure" page which shows CHF totals
 NATIVE_TO_CHF_PAIRS = {
     "USD": "USDCHF=X",
     "EUR": "EURCHF=X",
@@ -388,7 +378,6 @@ FALLBACK_FX_TO_CHF = {
 
 
 def _get_yf_pair(currency: str, target: str = "USD") -> str | None:
-    """Return the yfinance pair string for currency → target, or None if same."""
     if currency == target:
         return None
     if target == "USD":
@@ -398,15 +387,13 @@ def _get_yf_pair(currency: str, target: str = "USD") -> str | None:
     return f"{currency}{target}=X"
 
 
-# Runtime caches
-_fx_series_cache: dict = {}   # (pair, start, end) → pd.DataFrame
+_fx_series_cache: dict = {}
 
 
 def _fetch_fx_series(currency: str, start, end, target: str = "USD") -> pd.DataFrame | None:
-    """Download and cache a full FX time-series for currency → target."""
     pair = _get_yf_pair(currency, target)
     if pair is None:
-        return None   # same currency, rate = 1.0
+        return None
 
     key = (pair, str(start), str(end))
     if key not in _fx_series_cache:
@@ -419,10 +406,6 @@ def _fetch_fx_series(currency: str, start, end, target: str = "USD") -> pd.DataF
 
 
 def _fx_rate_on_date(currency: str, date, fx_series, target: str = "USD") -> float:
-    """
-    Return the conversion rate for 1 unit of *currency* → *target* on *date*.
-    Uses pre-fetched fx_series; falls back to hardcoded fallbacks.
-    """
     if currency == target:
         return 1.0
     fallbacks = FALLBACK_FX_TO_USD if target == "USD" else FALLBACK_FX_TO_CHF
@@ -437,7 +420,6 @@ def _fx_rate_on_date(currency: str, date, fx_series, target: str = "USD") -> flo
 
 
 def _spot_fx(currency: str, target: str = "USD") -> float:
-    """Fetch the latest spot rate for currency → target (single value)."""
     if currency == target:
         return 1.0
     pair = _get_yf_pair(currency, target)
@@ -454,7 +436,7 @@ def _spot_fx(currency: str, target: str = "USD") -> float:
 
 
 # =============================================================================
-# FINANCIAL ANALYSIS HELPERS  (module-level so @st.cache_data works correctly)
+# FINANCIAL ANALYSIS HELPERS
 # =============================================================================
 import statistics as _stats
 
@@ -482,22 +464,12 @@ _ALL_RATIO_COLS = (
 
 
 def _yf_info_with_retry(ticker: str, max_attempts: int = 4, base_delay: float = 3.0):
-    """
-    Fetch yfinance .info for *ticker* with exponential-backoff retry.
-    Returns (info_dict, error_str_or_None).
-
-    A fresh yf.Ticker() is created on every attempt so a rate-limited
-    session object is never reused.  A response is accepted only when at
-    least one of the core financial fields is actually populated — this
-    reliably distinguishes a real response from a rate-limit stub dict.
-    """
-    # Fields that yfinance always populates on a real (non-stub) response
     CORE_FIELDS = ("marketCap", "trailingPE", "priceToBook",
                    "returnOnEquity", "currentPrice", "regularMarketPrice")
 
     for attempt in range(max_attempts):
         try:
-            info = yf.Ticker(ticker).info   # fresh object every attempt
+            info = yf.Ticker(ticker).info
             if info and any(info.get(f) is not None for f in CORE_FIELDS):
                 return info, None
             raise ValueError(
@@ -507,7 +479,7 @@ def _yf_info_with_retry(ticker: str, max_attempts: int = 4, base_delay: float = 
         except Exception as e:
             err = str(e)
             if attempt < max_attempts - 1:
-                wait = base_delay * (2 ** attempt)   # 3 s, 6 s, 12 s, 24 s
+                wait = base_delay * (2 ** attempt)
                 print(f"  {ticker} attempt {attempt+1} failed: {err} — waiting {wait:.0f}s")
                 time.sleep(wait)
             else:
@@ -516,7 +488,6 @@ def _yf_info_with_retry(ticker: str, max_attempts: int = 4, base_delay: float = 
 
 
 def _extract_ratios(ti: dict, cf_df=None, bs_df=None) -> dict:
-    """Pull the standard ratio set from a yfinance info dict."""
     ocf_r = None
     if cf_df is not None and bs_df is not None:
         try:
@@ -545,11 +516,6 @@ def _extract_ratios(ti: dict, cf_df=None, bs_df=None) -> dict:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_sector_industry_avg(sector: str) -> dict:
-    """
-    Fetch peer ratios for the sector with retry + inter-ticker delay.
-    Cached for 1 hour so repeated clicks don't re-hit the API.
-    @st.cache_data works here because the function is module-level (not a closure).
-    """
     ratio_cols = list(_ALL_RATIO_COLS)
     etf_ticker = _SECTOR_ETFS.get(sector, "SPY")
     proxies    = _SECTOR_PROXIES.get(etf_ticker, _SECTOR_PROXIES["SPY"])
@@ -595,7 +561,7 @@ def fetch_sector_industry_avg(sector: str) -> dict:
 # =============================================================================
 st.set_page_config(
     page_title="Portfolio Analysis Dashboard",
-    page_icon="📊",
+    page_icon="",
     layout="wide",
 )
 
@@ -665,7 +631,7 @@ main_page = st.session_state.main_page
 # TRANSACTION HISTORY PAGE
 # =============================================================================
 if main_page == "Transactions":
-    st.title("📋 Transaction History")
+    st.title("Transaction History")
 
     @st.cache_data(show_spinner=False)
     def fetch_execution_prices(tx_df: pd.DataFrame) -> pd.Series:
@@ -687,7 +653,7 @@ if main_page == "Transactions":
                 prices.append(None)
         return pd.Series(prices, index=tx_df.index)
 
-    st.subheader("All Transactions")
+    st.markdown("**All Transactions**")
 
     with st.spinner("Fetching execution prices from yfinance…"):
         exec_prices = fetch_execution_prices(_tx.reset_index(drop=True))
@@ -716,7 +682,7 @@ if main_page == "Transactions":
     )
 
     st.markdown("---")
-    st.subheader("Net Position Summary")
+    st.markdown("**Net Position Summary**")
     rows = []
     for yf_ticker, grp in _tx.groupby("YF_Ticker"):
         if pd.isna(yf_ticker):
@@ -732,7 +698,7 @@ if main_page == "Transactions":
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("Transaction Timeline")
+    st.markdown("**Transaction Timeline**")
 
     with st.spinner("Computing bubble sizes from trade values…"):
         raw_prices = fetch_execution_prices(_tx.reset_index(drop=True))
@@ -740,7 +706,6 @@ if main_page == "Transactions":
     bubble_tx = _tx.reset_index(drop=True).copy()
     bubble_tx["exec_price"] = raw_prices.values
 
-    # Convert each trade's native price → USD for comparable bubble sizing
     spot_usd_rates = {
         t: _spot_fx(portfolio_holdings.get(t, {}).get("currency", "USD"), "USD")
         for t in bubble_tx["Ticker"].unique()
@@ -783,7 +748,7 @@ if main_page == "Transactions":
 # HOME PAGE
 # =============================================================================
 elif main_page == "Home":
-    st.title("🏠 Portfolio Dashboard - Home")
+    st.title("Portfolio Dashboard - Home")
 
     if "home_tab" not in st.session_state:
         st.session_state.home_tab = "Generic Summary"
@@ -791,15 +756,15 @@ elif main_page == "Home":
     st.markdown("### Select Analysis Type")
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("📈 Generic Summary\n\nKey metrics, performance vs MSCI World, portfolio treemap",
+        if st.button("Generic Summary\n\nKey metrics, performance vs MSCI World, portfolio treemap",
                      key="gen_summary", use_container_width=True):
             st.session_state.home_tab = "Generic Summary"
     with col2:
-        if st.button("🏗️ Portfolio Structure\n\nSector, geographical, and asset distribution",
+        if st.button("Portfolio Structure\n\nSector, geographical, and asset distribution",
                      key="portfolio_struct", use_container_width=True):
             st.session_state.home_tab = "Portfolio Structure Analysis"
     with col3:
-        if st.button("🔮 Forecast\n\nMonte Carlo, analyst targets, DCF analysis",
+        if st.button("Forecast\n\nMonte Carlo, analyst targets, DCF analysis",
                      key="forecast", use_container_width=True):
             st.session_state.home_tab = "Forecast"
 
@@ -810,7 +775,7 @@ elif main_page == "Home":
     # HOME - Generic Summary
     # =========================================================================
     if home_tab == "Generic Summary":
-        st.header("📈 Generic Summary")
+        st.markdown("## **Generic Summary**")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -820,7 +785,7 @@ elif main_page == "Home":
             end_date = st.date_input("End Date", value=pd.to_datetime("today"),
                                      help="Select the end date for analysis")
 
-        if st.button("📊 Generate Analysis", type="primary"):
+        if st.button("Generate Analysis", type="primary"):
             if start_date >= end_date:
                 st.error("Start date must be before end date.")
             else:
@@ -831,20 +796,17 @@ elif main_page == "Home":
                                       if isinstance(msci_world["Close"], pd.DataFrame)
                                       else msci_world["Close"])
 
-                        # Pre-fetch native→USD FX series for every currency used
                         used_currencies = {info["currency"] for info in portfolio_holdings.values()}
-                        fx_series_usd: dict = {}      # currency → pd.DataFrame (native→USD)
+                        fx_series_usd: dict = {}
                         for ccy in used_currencies:
                             fx_series_usd[ccy] = _fetch_fx_series(ccy, start_date, end_date, "USD")
 
-                        # Download price history for each holding
                         portfolio_data: dict = {}
                         for ticker in portfolio_holdings:
                             data = yf.download(ticker, start=start_date, end=end_date, progress=False)
                             if not data.empty:
                                 portfolio_data[ticker] = data
 
-                    # Helper: get closing price for a ticker on/before date (native currency)
                     def get_price_native(ticker, date, data_dict):
                         if ticker not in data_dict:
                             return None
@@ -853,21 +815,16 @@ elif main_page == "Home":
                         av = cl.index[cl.index <= date]
                         return float(cl.loc[av[-1]]) if len(av) > 0 else None
 
-                    # Helper: get native→USD rate on a date
                     def get_rate_usd(currency, date):
                         return _fx_rate_on_date(currency, date, fx_series_usd.get(currency), "USD")
 
                     # ── Risk Metrics ──────────────────────────────────────────
-                    st.subheader("📊 Portfolio Risk Metrics")
+                    st.markdown("### **Portfolio Risk Metrics**")
 
                     with st.spinner("Calculating Sharpe, Alpha & Beta…"):
                         all_dates = msci_close.index
 
-                        # ── Step 1: find the first date on which ANY position exists ──
-                        # This prevents the 0→value spike on the first trade date from
-                        # artificially collapsing volatility and inflating Sharpe.
                         first_trade_date = pd.Timestamp(_tx["Date"].min()).normalize()
-                        # Use the first market date ON OR AFTER the first trade
                         active_dates = all_dates[all_dates >= first_trade_date]
 
                         if len(active_dates) < 10:
@@ -885,17 +842,11 @@ elif main_page == "Home":
                                     daily_value += price_native * info["quantity"] * rate
                                 portfolio_values[date] = daily_value
 
-                            # ── Step 2: drop any leading zeros / NaNs before first real value ──
-                            # (safety net: if a position's data only starts mid-window)
                             first_nonzero = portfolio_values[portfolio_values > 0].index.min()
                             portfolio_values = portfolio_values.loc[first_nonzero:]
 
-                            # ── Step 3: daily returns (pct_change on equity value only) ──
-                            # Use ddof=1 (sample std), the standard for Sharpe ratio
                             port_ret = portfolio_values.pct_change().dropna()
 
-                            # Sanity-check: warn if any single return is unrealistically large
-                            # (sign of a data gap or bad FX conversion)
                             bad_ret = port_ret[port_ret.abs() > 0.25]
                             if not bad_ret.empty:
                                 st.warning(
@@ -914,18 +865,14 @@ elif main_page == "Home":
                                 pr = port_ret.loc[common]
                                 mr = msci_ret.loc[common]
 
-                                # ── Sharpe: annualised, sample std, rf = 2% pa ──────────────
                                 rf_daily = 0.02 / 252
                                 excess   = pr - rf_daily
-                                # ddof=1 is the correct sample standard deviation
                                 sharpe   = (excess.mean() / excess.std(ddof=1)) * np.sqrt(252) \
                                            if excess.std(ddof=1) != 0 else 0
 
-                                # Annualised portfolio & benchmark volatility
                                 port_vol_ann = pr.std(ddof=1) * np.sqrt(252) * 100
                                 msci_vol_ann = mr.std(ddof=1) * np.sqrt(252) * 100
 
-                                # ── Beta & Jensen's Alpha via OLS ────────────────────────────
                                 from scipy import stats as scipy_stats
                                 reg_data = pd.DataFrame({"msci": mr, "portfolio": pr}).dropna()
                                 if len(reg_data) > 2:
@@ -933,14 +880,11 @@ elif main_page == "Home":
                                         reg_data["msci"], reg_data["portfolio"]
                                     )
                                     beta = slope
-                                    # Jensen's alpha: annualise the daily intercept properly
-                                    # α_annual = intercept × 252  (linear approximation, standard practice)
                                     alpha_annual = intercept * 252
                                     r_squared    = r_val ** 2
                                 else:
                                     beta = alpha_annual = r_squared = 0.0
 
-                                # ── Display ──────────────────────────────────────────────────
                                 n_days = len(pr)
                                 st.caption(
                                     f"Computed over **{n_days} trading days** "
@@ -974,14 +918,8 @@ elif main_page == "Home":
 
                     st.markdown("---")
 
-                    # =========================================================
-                    # CASH-AWARE NAV  — fund base currency = USD
-                    # All stock prices fetched in NATIVE currency, then × rate→USD
-                    # Cash is always in USD
-                    # =========================================================
                     FUND_SIZE_USD = 1_000_000.0
 
-                    # Sort all transactions chronologically
                     all_tx = _tx.sort_values("Date").reset_index(drop=True)
                     tx_by_date: dict = {}
                     for _, tx_row in all_tx.iterrows():
@@ -1003,20 +941,16 @@ elif main_page == "Home":
                     for date in dates:
                         date_norm = pd.Timestamp(date).normalize()
 
-                        # Process trades on this date
                         for tx_row in tx_by_date.get(date_norm, []):
                             ticker = tx_row["Ticker"]
                             qty    = int(tx_row["Quantity"])
                             action = tx_row["Action"]
 
-                            # Price in NATIVE currency on trade date
                             price_native = get_price_native(ticker, date, portfolio_data)
                             if price_native is None:
-                                # Fallback: use stored purchase_price (also native), convert to USD
                                 price_native = portfolio_holdings.get(ticker, {}).get("purchase_price", 0.0)
 
                             ccy = portfolio_holdings.get(ticker, {}).get("currency", "USD")
-                            # Convert native → USD
                             price_usd = price_native * get_rate_usd(ccy, date)
 
                             if action == "Buy":
@@ -1026,7 +960,6 @@ elif main_page == "Home":
                                 cash_usd += price_usd * qty
                                 live_shares[ticker] = max(0, live_shares.get(ticker, 0) - qty)
 
-                        # Value equity positions in USD
                         equity_usd = 0.0
                         for ticker, shares in live_shares.items():
                             if shares <= 0:
@@ -1047,7 +980,7 @@ elif main_page == "Home":
                     cash_series   = pd.Series(cash_usd_list,   index=dates)
 
                     # ── Performance chart ─────────────────────────────────────
-                    st.subheader("📈 Portfolio vs MSCI World Performance")
+                    st.markdown("### **Portfolio vs MSCI World Performance**")
 
                     port_norm = nav_series / FUND_SIZE_USD * 100
                     msci_norm = msci_close / msci_close.iloc[0] * 100
@@ -1097,7 +1030,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 """)
 
                     # ── Treemap ───────────────────────────────────────────────
-                    st.subheader("🗺️ Portfolio Composition Treemap (USD)")
+                    st.markdown("### **Portfolio Composition Treemap** (USD)")
                     treemap_data = []
                     final_date   = dates[-1]
 
@@ -1114,13 +1047,12 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                         price_usd = price_native * get_rate_usd(ccy, final_date)
                         curr_val  = price_usd * shares
 
-                        # Cost basis in USD
                         buy_tx   = all_tx[(all_tx["Ticker"] == ticker) & (all_tx["Action"] == "Buy")]
                         cost_usd = 0.0
                         for _, brow in buy_tx.iterrows():
                             bp = get_price_native(ticker, brow["Date"], portfolio_data)
                             if bp is None:
-                                bp = info["purchase_price"]   # native price
+                                bp = info["purchase_price"]
                             bp_usd    = bp * _fx_rate_on_date(ccy, brow["Date"], fx_series_usd.get(ccy), "USD")
                             cost_usd += bp_usd * int(brow["Quantity"])
 
@@ -1136,7 +1068,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                             "price_usd": price_usd,
                         })
 
-                    # Cash row
                     treemap_data.append({
                         "ticker": "CASH", "name": "Cash (USD)",
                         "weight": final_cash / final_nav * 100,
@@ -1161,7 +1092,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     st.plotly_chart(fig_tm, use_container_width=True)
 
                     # ── Holdings table ────────────────────────────────────────
-                    st.subheader("📋 Holdings Details (USD, all FX converted)")
+                    st.markdown("### **Holdings Details** (USD, all FX converted)")
                     ht = treemap_df.copy()
                     ht["Return (%)"]   = ht["performance"].apply(lambda x: f"{x:.2f}%")
                     ht["Weight (%)"]   = ht["weight"].apply(lambda x: f"{x:.2f}%")
@@ -1187,7 +1118,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
     # HOME - Portfolio Structure Analysis
     # =========================================================================
     elif home_tab == "Portfolio Structure Analysis":
-        st.header("🏗️ Portfolio Structure Analysis")
+        st.markdown("## **Portfolio Structure Analysis**")
 
         @st.cache_data(show_spinner=False)
         def fetch_hq_countries(tickers: tuple) -> dict:
@@ -1258,8 +1189,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
         try:
             with st.spinner("Loading portfolio structure…"):
-                # ── Convert everything to USD — same basis as Generic Summary ──
-                # Spot native→USD rates (single value per currency, for current snapshot)
                 spot_usd_rates = {}
                 for ccy in {info["currency"] for info in portfolio_holdings.values()}:
                     spot_usd_rates[ccy] = _spot_fx(ccy, "USD")
@@ -1267,7 +1196,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 cur_prices = {}
                 co_info    = {}
                 for ticker, info in portfolio_holdings.items():
-                    # ── Current price (fresh Ticker per attempt) ──────────────
                     price = None
                     for _attempt in range(3):
                         try:
@@ -1279,9 +1207,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                             time.sleep(2 ** _attempt)
                     cur_prices[ticker] = price if price is not None else info["purchase_price"]
 
-                    # ── Market cap — fresh Ticker each attempt ────────────────
-                    # fast_info.market_cap is the most reliable lightweight source;
-                    # fall through to full .info if it returns None/0.
                     mc = 0
                     for _attempt in range(3):
                         try:
@@ -1303,7 +1228,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 elif mc >= 2e9:  return "Mid"
                 else:            return "Small"
 
-            # ── Build equity values in USD ────────────────────────────────────
             holdings_analysis = []
             total_equity_usd  = 0.0
             for ticker, info in portfolio_holdings.items():
@@ -1322,22 +1246,14 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                         "market_cap":  classify_mc(co_info.get(ticker, {}).get("market_cap", 0)),
                         "currency":    info["currency"],
                         "value_usd":   val_usd,
-                        # weight vs full fund NAV (equity + cash) — matches Generic Summary
                         "weight_nav":  0.0,
-                        # weight vs equity-only — useful for sector/geo breakdown
                         "weight_eq":   0.0,
                     })
 
-            # ── Reconstruct current cash position ─────────────────────────────
-            # Replay every trade using:
-            #   - the actual closing price on the trade date
-            #   - the FX rate on THAT trade date (not today's spot)
-            # This mirrors the Generic Summary NAV loop exactly.
             FUND_SIZE_USD = 1_000_000.0
             cash_usd      = FUND_SIZE_USD
             all_tx_sorted = _tx.sort_values("Date").reset_index(drop=True)
 
-            # Pre-fetch FX series for every currency used, covering the full trade window
             tx_start = all_tx_sorted["Date"].min()
             tx_end   = pd.Timestamp.today()
             used_ccys = {portfolio_holdings.get(t, {}).get("currency", "USD")
@@ -1354,12 +1270,10 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 trade_date = tx_row["Date"]
                 ccy        = portfolio_holdings.get(t, {}).get("currency", "USD")
 
-                # Actual closing price on the trade date (same as Generic Summary)
                 price_native = _fetch_close_on_date(t, trade_date)
                 if price_native is None:
                     price_native = portfolio_holdings.get(t, {}).get("purchase_price", 0.0)
 
-                # FX rate on that exact trade date — not today's spot
                 fx_rate   = _fx_rate_on_date(ccy, trade_date, fx_series_struct.get(ccy), "USD")
                 price_usd = price_native * fx_rate
 
@@ -1370,22 +1284,18 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
             cash_usd = max(cash_usd, 0.0)
 
-            # Full fund NAV = equity + cash (same denominator as Generic Summary)
             total_nav_usd = total_equity_usd + cash_usd
 
-            # Populate weights
             for h in holdings_analysis:
                 h["weight_nav"] = h["value_usd"] / total_nav_usd  * 100 if total_nav_usd  > 0 else 0
                 h["weight_eq"]  = h["value_usd"] / total_equity_usd * 100 if total_equity_usd > 0 else 0
 
-            # Use NAV-based weight throughout so it matches Generic Summary
             for h in holdings_analysis:
                 h["weight"] = h["weight_nav"]
 
             df_an = pd.DataFrame(holdings_analysis)
             blue  = ["#0F1D64","#1E3A8A","#3B82F6","#60A5FA","#93C5FD","#DBEAFE"]
 
-            # ── Summary metrics banner ────────────────────────────────────────
             cash_pct   = cash_usd / total_nav_usd * 100 if total_nav_usd > 0 else 0
             equity_pct = total_equity_usd / total_nav_usd * 100 if total_nav_usd > 0 else 0
             st.info(
@@ -1395,8 +1305,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 f"*Weights below are vs full NAV (equity + cash), consistent with Generic Summary.*"
             )
 
-            st.subheader("📊 Sector Distribution")
-            # Include cash as its own "sector" so weights sum to 100% of NAV
+            st.markdown("### **Sector Distribution**")
             sec_data = df_an.groupby("sector")["weight"].sum().reset_index()
             sec_data.columns = ["Sector","Weight (%)"]
             if cash_pct > 0:
@@ -1418,7 +1327,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 for _, r in sec_data.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Sector"], f"{r['Weight (%)']:.1f}%")
 
-            st.subheader("🌍 Geographical Distribution")
+            st.markdown("### **Geographical Distribution**")
             c1, c2 = st.columns([2,1])
             with c1:
                 cnt_alloc = df_an.groupby(["country","country_iso"])["weight"].sum().reset_index()
@@ -1444,7 +1353,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 st.dataframe(cnt_alloc[["Country","Weight (%)"]].sort_values("Weight (%)", ascending=False)
                              .style.format({"Weight (%)":"{:.1f}%"}), use_container_width=True, hide_index=True)
 
-            st.subheader("📈 Additional Analysis")
+            st.markdown("### **Additional Analysis**")
             c1, c2 = st.columns(2)
             with c1:
                 mc_alloc = df_an.groupby("market_cap")["weight"].sum().reset_index()
@@ -1455,10 +1364,8 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_mc.update_layout(height=350, showlegend=False)
                 st.plotly_chart(fig_mc, use_container_width=True)
             with c2:
-                # Currency exposure: show both native ccy and add USD cash
                 cur_data = df_an.groupby("currency")["weight"].sum().reset_index()
                 cur_data.columns = ["Currency","Weight (%)"]
-                # Add cash as USD exposure
                 existing_usd = cur_data.loc[cur_data["Currency"]=="USD","Weight (%)"].sum()
                 if existing_usd > 0:
                     cur_data.loc[cur_data["Currency"]=="USD","Weight (%)"] += cash_pct
@@ -1474,7 +1381,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_cur.update_layout(height=350)
                 st.plotly_chart(fig_cur, use_container_width=True)
 
-            st.subheader("🎯 Concentration Metrics")
+            st.markdown("### **Concentration Metrics**")
             df_sorted  = df_an.sort_values("weight", ascending=False)
             top5_conc  = df_sorted.head(5)["weight"].sum()
             top10_conc = df_sorted.head(10)["weight"].sum()
@@ -1493,7 +1400,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             th.columns = ["Company","Sector","Country","Native Ccy","Value (USD)","Weight (% NAV)"]
             st.dataframe(th, use_container_width=True, hide_index=True)
 
-            st.subheader("📋 Portfolio Summary (USD)")
+            st.markdown("### **Portfolio Summary** (USD)")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Holdings",  len(df_an))
             c2.metric("Fund NAV (USD)",  f"${total_nav_usd:,.0f}")
@@ -1508,7 +1415,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
     # HOME - Forecast
     # =========================================================================
     elif home_tab == "Forecast":
-        st.header("🔮 Portfolio Forecast")
+        st.markdown("## **Forecast**")
 
         with st.spinner("Loading stock data…"):
             stock_data = {}
@@ -1517,7 +1424,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     hist = yf.Ticker(ticker).history(period="1y")
                     if not hist.empty:
                         stock_data[ticker] = {
-                            "current_price": hist["Close"].iloc[-1],   # native currency
+                            "current_price": hist["Close"].iloc[-1],
                             "historical": hist,
                         }
                 except Exception as e:
@@ -1527,14 +1434,13 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
         # ── Monte Carlo ──────────────────────────────────────────────────────
         with forecast_method[0]:
-            st.subheader("📊 Monte Carlo Simulation")
+            st.markdown("### **Monte Carlo Simulation**")
             st.markdown("Probabilistic portfolio performance projections (values in USD, all FX converted)")
 
             c1, c2, c3 = st.columns(3)
             with c1: num_sim = st.number_input("Simulations",    100, 10000, 1000, 100)
             with c2: time_h  = st.number_input("Horizon (days)",  30,  1825,  252,  30)
             with c3:
-                # Compute total portfolio value in USD using spot rates
                 tot_val = sum(
                     stock_data[t]["current_price"]
                     * portfolio_holdings[t]["quantity"]
@@ -1545,7 +1451,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
             if st.button("Run Monte Carlo Simulation", type="primary"):
                 with st.spinner("Running simulations…"):
-                    # Portfolio weights in USD
                     pv = {
                         t: stock_data[t]["current_price"]
                            * portfolio_holdings[t]["quantity"]
@@ -1604,7 +1509,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
         # ── Analyst Consensus ────────────────────────────────────────────────
         with forecast_method[1]:
-            st.subheader("📈 Analyst Consensus Forecast")
+            st.markdown("### **Analyst Consensus Forecast**")
             st.caption("Target prices are in native currency; values converted to USD for comparison.")
             analyst_data = []
             for ticker in portfolio_holdings:
@@ -1667,7 +1572,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
         # ── DCF ──────────────────────────────────────────────────────────────
         with forecast_method[2]:
-            st.subheader("💰 DCF Analysis")
+            st.markdown("### **DCF Analysis**")
             st.info("Simplified DCF model — values remain in the stock's native currency.")
             sel = st.selectbox("Select Stock for DCF Analysis",
                                [t for t in portfolio_holdings if t in stock_data])
@@ -1697,9 +1602,9 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     tv = pf[-1] * (1 + tg / 100) / (wacc_ / 100 - tg / 100)
                     pv_tv = tv / (1 + wacc_ / 100) ** py
                     ev   = sum(pv) + pv_tv
-                    fv   = ev / shares                                      # native currency
+                    fv   = ev / shares
                     fv_usd = fv * _spot_fx(ccy_sel, "USD")
-                    cp   = stock_data[sel]["current_price"]                 # native currency
+                    cp   = stock_data[sel]["current_price"]
                     cp_usd = cp * _spot_fx(ccy_sel, "USD")
                     ud   = (fv - cp) / cp * 100 if cp > 0 else 0
 
@@ -1717,9 +1622,9 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                  f"Present Value ({ccy_sel})": f"{pv[y]/1e6:.1f}M"} for y in range(py)]
                     st.dataframe(pd.DataFrame(dcf_rows), use_container_width=True, hide_index=True)
 
-                    if ud > 20:    st.success(f"💡 **Undervalued** by {ud:.1f}%")
-                    elif ud < -20: st.error(f"💡 **Overvalued** by {abs(ud):.1f}%")
-                    else:          st.info("💡 **Fairly valued** (within ±20%)")
+                    if ud > 20:    st.success(f"Undervalued by {ud:.1f}%")
+                    elif ud < -20: st.error(f"Overvalued by {abs(ud):.1f}%")
+                    else:          st.info("Fairly valued (within ±20%)")
 
 # =============================================================================
 # SECTOR PAGES
@@ -1728,7 +1633,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                    "PUI Sector","Consumer Goods Sector","Healthcare Sector"]:
 
     sector_name = main_page.replace(" Sector", "")
-    st.title(f"🏢 {sector_name} Sector Analysis")
+    st.title(f"{sector_name} Sector Analysis")
 
     sector_holdings = {k: v for k, v in portfolio_holdings.items() if v["sector"] == sector_name}
 
@@ -1741,13 +1646,13 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
         st.markdown("### Select Analysis Type")
         c1, c2, c3 = st.columns(3)
         with c1:
-            if st.button("📈 Performance Analysis", key=f"perf_{sector_name}", use_container_width=True):
+            if st.button("Performance Analysis", key=f"perf_{sector_name}", use_container_width=True):
                 st.session_state.sector_tab = "Performance Analysis"; st.rerun()
         with c2:
-            if st.button("💰 Financial Analysis", key=f"fin_{sector_name}", use_container_width=True):
+            if st.button("Financial Analysis", key=f"fin_{sector_name}", use_container_width=True):
                 st.session_state.sector_tab = "Financial Analysis"; st.rerun()
         with c3:
-            if st.button("🏢 Company Specific", key=f"spec_{sector_name}", use_container_width=True):
+            if st.button("Company Specific", key=f"spec_{sector_name}", use_container_width=True):
                 st.session_state.sector_tab = "Company Specific"; st.rerun()
 
         st.markdown("---")
@@ -1755,7 +1660,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
         # ── Performance Analysis ─────────────────────────────────────────────
         if sector_tab == "Performance Analysis":
-            st.header(f"📈 {sector_name} - Performance Analysis")
+            st.markdown(f"## **Performance Analysis** — {sector_name}")
 
             benchmarks = {"TMT":"XLK","FIG":"XLF","Industrials":"XLI",
                           "PUI":"XLB","Consumer Goods":"XLP","Healthcare":"XLV"}
@@ -1765,7 +1670,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
             with c1: start_date = st.date_input("Start Date", pd.to_datetime("2025-11-06"), key=f"s_{sector_name}")
             with c2: end_date   = st.date_input("End Date",   pd.to_datetime("today"),       key=f"e_{sector_name}")
 
-            if st.button("📊 Generate Performance Analysis", type="primary", key=f"gen_{sector_name}"):
+            if st.button("Generate Performance Analysis", type="primary", key=f"gen_{sector_name}"):
                 if start_date >= end_date:
                     st.error("Start date must be before end date.")
                 else:
@@ -1775,7 +1680,6 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                             bm_data = yf.download(bm_ticker, start=start_date, end=end_date, progress=False)
                             bm_close = bm_data["Close"].iloc[:,0] if isinstance(bm_data["Close"],pd.DataFrame) else bm_data["Close"]
 
-                            # Pre-fetch native→USD FX for all sector currencies
                             used_ccy_s = {info["currency"] for info in sector_holdings.values()}
                             fx_usd_s   = {ccy: _fetch_fx_series(ccy, start_date, end_date, "USD") for ccy in used_ccy_s}
 
@@ -1801,7 +1705,6 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                             return _fx_rate_on_date(currency, date, fx_usd_s.get(currency), "USD")
 
                         all_dates = bm_close.index
-                        # Trim to active window: from the first sector trade onward
                         sector_first_trade = pd.Timestamp(
                             _tx[_tx["Ticker"].isin(sector_holdings.keys())]["Date"].min()
                         ).normalize()
@@ -1815,12 +1718,10 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                 dv += p * info["quantity"] * get_rate_s(info["currency"], date)
                             sec_vals[date] = dv
 
-                        # Drop leading zeros in case first positions have missing price data
                         first_nonzero_s = sec_vals[sec_vals > 0].index.min()
                         sec_vals        = sec_vals.loc[first_nonzero_s:]
 
                         sec_ret = sec_vals.pct_change().dropna()
-                        # Exclude extreme single-day moves (>25%) — data gaps / FX spikes
                         sec_ret = sec_ret[sec_ret.abs() <= 0.25]
 
                         bm_ret  = bm_close.pct_change().dropna()
@@ -1832,13 +1733,12 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
                         rf    = 0.02/252
                         exc   = sr - rf
-                        # ddof=1: sample standard deviation (standard for Sharpe)
                         sharpe = (exc.mean()/exc.std(ddof=1))*np.sqrt(252) if exc.std(ddof=1) != 0 else 0
 
                         rd = pd.DataFrame({"bm":br,"sec":sr}).dropna()
                         if len(rd) > 2:
                             sl, ic, r_val_s, *_ = scipy_stats.linregress(rd["bm"], rd["sec"])
-                            beta = sl; alpha_a = ic * 252   # Jensen's alpha: daily intercept × 252
+                            beta = sl; alpha_a = ic * 252
                         else:
                             beta = alpha_a = 0.0
 
@@ -1849,7 +1749,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         act   = sr - br; te = act.std(ddof=1)*np.sqrt(252)
                         ir    = (act.mean()*252)/te if te != 0 else 0
 
-                        st.subheader("🎯 Key Performance Metrics (USD-based)")
+                        st.markdown("### **Key Performance Metrics** (USD-based)")
                         c1, c2, c3, c4 = st.columns(4)
                         c1.metric("Total Return (Sector)",    f"{trs:.2f}%", delta=f"{trs-trb:.2f}% vs benchmark")
                         c1.metric("Sharpe Ratio",             f"{sharpe:.2f}")
@@ -1863,7 +1763,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         c1.metric("Alpha (Annualized)", f"{alpha_a*100:.2f}%")
                         c2.metric("Tracking Error",     f"{te*100:.2f}%")
 
-                        st.subheader(f"📊 {sector_name} vs {bm_ticker} Performance (USD)")
+                        st.markdown(f"### **{sector_name} vs {bm_ticker} Performance** (USD)")
                         sn = (sec_vals/sec_vals.iloc[0])*100
                         bn = (bm_close/bm_close.iloc[0])*100
                         fig = go.Figure()
@@ -1878,13 +1778,12 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                         fig.update_layout(yaxis_title="Normalised Value (Base=100)", xaxis_title="Date")
                         st.plotly_chart(fig, use_container_width=True)
 
-                        st.subheader("🏆 Holdings Performance Breakdown (USD)")
+                        st.markdown("### **Holdings Performance Breakdown** (USD)")
                         hp = []
                         for ticker, info in sector_holdings.items():
                             if ticker in sector_data:
                                 ip = init_prices[ticker]; cp_ = cur_prices_s[ticker]
                                 ret_pct = ((cp_/ip)-1)*100
-                                # Value in USD using first/last date FX
                                 iv_usd = ip * get_rate_s(info["currency"], sec_vals.index[0])  * info["quantity"]
                                 cv_usd = cp_ * get_rate_s(info["currency"], sec_vals.index[-1]) * info["quantity"]
                                 wt     = iv_usd / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
@@ -1898,7 +1797,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                      .background_gradient(subset=["Return (%)"], cmap="RdYlGn"),
                                      hide_index=True, use_container_width=True)
 
-                        st.subheader("⚠️ Risk Metrics")
+                        st.markdown("### **Risk Metrics**")
                         var95 = np.percentile(sr, 5) * 100
                         if len(sector_holdings) > 1:
                             rdict = {}
@@ -1922,11 +1821,9 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
         # ── Financial Analysis ───────────────────────────────────────────────
         elif sector_tab == "Financial Analysis":
-            st.header(f"💰 {sector_name} - Financial Analysis")
-            # Helpers (_yf_info_with_retry, _extract_ratios, fetch_sector_industry_avg)
-            # are defined at module level so @st.cache_data works correctly.
+            st.markdown(f"## **Financial Analysis** — {sector_name}")
 
-            if st.button("📊 Generate Financial Analysis", type="primary", key=f"fin_gen_{sector_name}"):
+            if st.button("Generate Financial Analysis", type="primary", key=f"fin_gen_{sector_name}"):
 
                 fin_rows  = []
                 failed_tx = []
@@ -1934,21 +1831,19 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                 tickers_list = list(sector_holdings.items())
 
                 for i, (ticker, info) in enumerate(tickers_list):
-                    status_ph.info(f"⏳ Fetching data for **{ticker}** ({i+1}/{len(tickers_list)})…")
+                    status_ph.info(f"Fetching data for **{ticker}** ({i+1}/{len(tickers_list)})…")
                     ti, err = _yf_info_with_retry(ticker, max_attempts=4, base_delay=3.0)
 
                     if err:
-                        # One final attempt after a longer cool-down
-                        status_ph.warning(f"⚠️ Rate-limited on {ticker}, waiting 15 s then retrying…")
+                        status_ph.warning(f"Rate-limited on {ticker}, waiting 15 s then retrying…")
                         time.sleep(15)
                         ti, err2 = _yf_info_with_retry(ticker, max_attempts=3, base_delay=5.0)
                         if err2:
                             failed_tx.append((ticker, err2))
-                            status_ph.warning(f"⚠️ Skipping **{ticker}** after repeated failures.")
+                            status_ph.warning(f"Skipping **{ticker}** after repeated failures.")
                             time.sleep(1)
                             continue
 
-                    # Cashflow & balance sheet for OCF ratio (failure is non-fatal)
                     cf_df = bs_df = None
                     try:
                         tk    = yf.Ticker(ticker)
@@ -1960,14 +1855,14 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     row = {"Ticker": ticker, "Name": info["name"], "Currency": info["currency"]}
                     row.update(_extract_ratios(ti, cf_df, bs_df))
                     fin_rows.append(row)
-                    time.sleep(1.0)   # polite inter-ticker pause
+                    time.sleep(1.0)
 
                 status_ph.empty()
 
                 if failed_tx:
                     names = ", ".join(t for t, _ in failed_tx)
                     st.warning(
-                        f"⚠️ Could not retrieve data for **{names}** (rate-limited). "
+                        f"Could not retrieve data for **{names}** (rate-limited). "
                         "Their bars are omitted but the **industry benchmark still uses the full peer set**."
                     )
 
@@ -1976,14 +1871,12 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     st.stop()
 
                 fin_df = pd.DataFrame(fin_rows)
-                st.success(f"✅ Retrieved data for {len(fin_rows)}/{len(tickers_list)} holdings.")
+                st.success(f"Retrieved data for {len(fin_rows)}/{len(tickers_list)} holdings.")
 
-                # Industry average — module-level cached function (1 h TTL)
                 with st.spinner("Fetching sector industry benchmarks (cached for 1 h)…"):
                     ind_avgs = fetch_sector_industry_avg(sector_name)
 
-                # ── 3. Charts ─────────────────────────────────────────────────
-                st.subheader("📊 Key Financial Ratios")
+                st.markdown("### **Key Financial Ratios**")
                 ratio_cfg = [
                     ("P/E Ratio",    "Price-to-Earnings"),
                     ("P/B Ratio",    "Price-to-Book"),
@@ -2021,11 +1914,10 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     )
                     (c1 if idx % 2 == 0 else c2).plotly_chart(fig, use_container_width=True)
 
-                # ── 4. Full table & stats ─────────────────────────────────────
-                st.subheader("📋 Comprehensive Financial Summary")
+                st.markdown("### **Comprehensive Financial Summary**")
                 st.dataframe(fin_df.fillna("N/A"), hide_index=True, use_container_width=True)
 
-                st.subheader("🔍 Sector Statistics")
+                st.markdown("### **Sector Statistics**")
                 nd = fin_df.select_dtypes(include=[np.number])
                 if not nd.empty:
                     st.dataframe(
@@ -2035,14 +1927,14 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     )
 
                 if ind_avgs:
-                    st.subheader("📐 Industry Benchmark Medians")
+                    st.markdown("### **Industry Benchmark Medians**")
                     bm_df = pd.DataFrame([{"Ratio": k, "Industry Median": round(v, 2)}
                                           for k, v in ind_avgs.items()])
                     st.dataframe(bm_df, hide_index=True, use_container_width=True)
 
         # ── Company Specific ─────────────────────────────────────────────────
         elif sector_tab == "Company Specific":
-            st.header(f"🏢 {sector_name} - Company Specific Analysis")
+            st.markdown(f"## **Company Specific Analysis** — {sector_name}")
 
             comp_opts = {info["name"]: ticker for ticker, info in sector_holdings.items()}
             sel_name  = st.selectbox("Select Company", list(comp_opts.keys()), key=f"cs_{sector_name}")
@@ -2052,7 +1944,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                 cinfo      = sector_holdings[sel_ticker]
                 ccy        = cinfo["currency"]
 
-                st.subheader(f"📊 {sel_name} ({sel_ticker}) — Native currency: {ccy}")
+                st.subheader(f"{sel_name} ({sel_ticker}) — Native currency: {ccy}")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Sector",        cinfo["sector"])
                 c2.metric("Currency",      ccy)
@@ -2060,7 +1952,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                 c4.metric(f"Avg Buy Price ({ccy})", f"{cinfo['purchase_price']:.2f}")
 
                 st.markdown("---")
-                st.subheader("📋 Transaction History for This Stock")
+                st.markdown("### **Transaction History** for This Stock")
                 tx_stock = cinfo.get("_transactions", pd.DataFrame())
                 if not tx_stock.empty:
                     tx_display = tx_stock.copy()
@@ -2082,7 +1974,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                     st.plotly_chart(fig_tx, use_container_width=True)
 
                 st.markdown("---")
-                st.subheader(f"📈 Stock Price Analysis ({ccy})")
+                st.markdown(f"### **Stock Price Analysis** ({ccy})")
                 c1, c2 = st.columns(2)
                 pd_dt = pd.to_datetime(cinfo["purchase_date"])
                 with c1: chart_start = st.date_input("Chart Start Date", (pd_dt - pd.Timedelta(days=30)).date(), key=f"cs_{sel_ticker}")
@@ -2099,7 +1991,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
 
                 target_price = cinfo.get("Target_price")
 
-                if st.button("📊 Generate Stock Analysis", type="primary", key=f"gsa_{sel_ticker}"):
+                if st.button("Generate Stock Analysis", type="primary", key=f"gsa_{sel_ticker}"):
                     if chart_start >= chart_end:
                         st.error("Start date must be before end date.")
                     else:
@@ -2175,7 +2067,7 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                     c4.metric("Upside to Target", "N/A")
 
                                 st.markdown("---")
-                                st.subheader("🎯 Price Targets")
+                                st.markdown("### **Price Targets**")
                                 c1, c2, c3, c4 = st.columns(4)
                                 c1.metric(f"Your Target Price ({ccy})",   f"{target_price:.2f}" if target_price else "Not Set")
                                 c2.metric(f"Analyst Consensus ({ccy})",   f"{an_target:.2f}" if an_target else "N/A")
@@ -2183,11 +2075,11 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
                                 c4.metric("Recommendation",               an_rec)
 
                                 st.markdown("---")
-                                st.subheader("💡 Investment Thesis")
+                                st.markdown("### **Investment Thesis**")
                                 st.info(cinfo.get("thesis", "No thesis available"))
 
                                 st.markdown("---")
-                                st.subheader("💰 DCF Valuation Parameters")
+                                st.markdown("### **DCF Valuation Parameters**")
                                 c1, c2 = st.columns(2)
                                 c1.write(f"**WACC:** {cinfo.get('WACC','N/A')}%")
                                 with c2:
