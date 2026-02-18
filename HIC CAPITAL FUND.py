@@ -1629,8 +1629,8 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 # =============================================================================
 # SECTOR PAGES
 # =============================================================================
-elif main_page in ["📱TMT Sector","🏦FIG Sector","🏭Industrials Sector",
-                   "⚡PUI Sector","🛒Consumer Goods Sector","🏥Healthcare Sector"]:
+elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector",
+                   "⚡ PUI Sector","🛒 Consumer Goods Sector","🏥 Healthcare Sector"]:
                        
     sector_name = main_page.replace(" Sector", "")
     st.title(f"{sector_name} Sector Analysis")
