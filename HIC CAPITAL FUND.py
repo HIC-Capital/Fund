@@ -4,10 +4,89 @@ import plotly.graph_objects as go
 import plotly.express as px
 import numpy as np
 import yfinance as yf
+import json, time
+from pathlib import Path
 
 # =============================================================================
 # LOAD TRANSACTION HISTORY & STATIC INFO FROM EXCEL
 # =============================================================================
+
+# =============================================================================
+# CURRENCY CACHE  — persists to disk so a cold-boot rate-limit never poisons values
+# =============================================================================
+_CCY_CACHE_FILE = Path("currency_cache.json")
+
+def _resolve_currencies(tickers: list[str]) -> dict[str, str]:
+    """
+    Return {ticker: currency_code} for every ticker in *tickers*.
+
+    Strategy per ticker:
+      1. Read from currency_cache.json  →  instant, survives reboots
+      2. If not cached (or previously failed): fetch from yfinance with retry
+      3. On success: write to cache file immediately so next boot is free
+      4. On persistent failure: leave out of cache so the next boot retries again
+         (never permanently store a wrong value)
+    """
+    # Load existing cache from disk
+    disk_cache: dict = {}
+    if _CCY_CACHE_FILE.exists():
+        try:
+            disk_cache = json.loads(_CCY_CACHE_FILE.read_text())
+        except Exception:
+            disk_cache = {}
+
+    result     = {}
+    cache_dirty = False
+
+    for ticker in tickers:
+        # Already cached and looks valid
+        cached = disk_cache.get(ticker)
+        if cached and isinstance(cached, str) and len(cached) == 3:
+            result[ticker] = cached
+            print(f"  {ticker}: {cached}  [disk cache]")
+            continue
+
+        # Need to fetch from yfinance — retry up to 4 times with backoff
+        ccy = None
+        for attempt in range(4):
+            try:
+                info = yf.Ticker(ticker).fast_info   # fast_info is lighter than .info
+                raw_ccy = getattr(info, "currency", None)
+                if raw_ccy and isinstance(raw_ccy, str) and len(raw_ccy) == 3:
+                    ccy = raw_ccy.upper()
+                    break
+                # fast_info may not have it — try full .info
+                full = yf.Ticker(ticker).info
+                raw_ccy = full.get("currency")
+                if raw_ccy and isinstance(raw_ccy, str) and len(raw_ccy) == 3:
+                    ccy = raw_ccy.upper()
+                    break
+            except Exception as e:
+                wait = 2 ** attempt          # 1 s, 2 s, 4 s, 8 s
+                print(f"  {ticker}: yfinance error ({e}), retrying in {wait}s…")
+                time.sleep(wait)
+
+        if ccy:
+            result[ticker]      = ccy
+            disk_cache[ticker]  = ccy
+            cache_dirty         = True
+            print(f"  {ticker}: {ccy}  [yfinance → cached]")
+        else:
+            # Don't write a failed entry — next boot will retry
+            result[ticker] = "USD"
+            print(f"  {ticker}: could not resolve, defaulting to USD (not cached)")
+
+        time.sleep(0.3)   # gentle inter-ticker pause
+
+    # Persist updated cache to disk
+    if cache_dirty:
+        try:
+            _CCY_CACHE_FILE.write_text(json.dumps(disk_cache, indent=2))
+        except Exception as e:
+            print(f"Warning: could not write currency cache: {e}")
+
+    return result
+
 
 @st.cache_data(show_spinner=False)
 def load_data():
@@ -98,79 +177,12 @@ def load_data():
                 return info_col_map[candidate]
         return None
 
-    # ── Currency resolution — priority order ─────────────────────────────────
-    # 1. Excel "Currency" / "CCY" column  (most reliable — never flakes)
-    # 2. yfinance .info["currency"]        (fallback only when Excel column absent)
-    # 3. Hard-coded suffix map             (fallback when yfinance also fails)
-    # This order ensures a cold-boot rate-limit never poisons the cache with "USD".
-
-    SUFFIX_CCY = {
-        ".NS": "INR", ".BO": "INR",
-        ".L":  "GBP", ".IL": "GBP",
-        ".DE": "EUR", ".F":  "EUR", ".XETRA": "EUR",
-        ".PA": "EUR", ".AM": "EUR", ".AS": "EUR",
-        ".MI": "EUR", ".MC": "EUR",
-        ".SW": "CHF",
-        ".HK": "HKD",
-        ".AX": "AUD",
-        ".TO": "CAD", ".V":  "CAD",
-        ".T":  "JPY",
-        ".KS": "KRW", ".KQ": "KRW",
-        ".SS": "CNY", ".SZ": "CNY",
-        ".ST": "SEK", ".CO": "DKK", ".OL": "NOK",
-        ".HE": "EUR", ".BR": "EUR", ".LS": "EUR",
-        ".LI": "CHF",
-    }
-
-    ccy_col = resolve_col("currency")   # column name in Excel, or None
-
-    def _ccy_from_excel(ticker):
-        """Read currency for *ticker* from the Excel sheet (first non-blank value)."""
-        if ccy_col is None:
-            return None
-        rows = raw[raw[ticker_col].astype(str).str.strip() == ticker][ccy_col]
-        rows = rows.dropna()
-        rows = rows[rows.astype(str).str.strip() != ""]
-        if len(rows) == 0:
-            return None
-        val = str(rows.iloc[0]).strip().upper()
-        return val if len(val) == 3 else None
-
-    def _ccy_from_suffix(ticker):
-        """Infer currency from the ticker's exchange suffix (e.g. .NS → INR)."""
-        t = ticker.upper()
-        for suffix, ccy in SUFFIX_CCY.items():
-            if t.endswith(suffix.upper()):
-                return ccy
-        return None
-
-    def _ccy_from_yf(ticker):
-        """Query yfinance for the trading currency — used only as last resort."""
-        try:
-            info = yf.Ticker(ticker).info
-            ccy  = info.get("currency", None)
-            if ccy and isinstance(ccy, str) and len(ccy) == 3:
-                return ccy.upper()
-        except Exception:
-            pass
-        return None
-
-    print("Resolving currencies (Excel → suffix map → yfinance)…")
-    yf_currencies = {}
-    for ticker in unique_tickers:
-        ccy = _ccy_from_excel(ticker)
-        src = "excel"
-        if not ccy:
-            ccy = _ccy_from_suffix(ticker)
-            src = "suffix"
-        if not ccy:
-            ccy = _ccy_from_yf(ticker)
-            src = "yfinance"
-        if not ccy:
-            ccy = "USD"
-            src = "default"
-        yf_currencies[ticker] = ccy
-        print(f"  {ticker}: {ccy}  [{src}]")
+    # ── Currency resolution via yfinance with disk cache ──────────────────────
+    # Currencies are fetched from yfinance and stored in currency_cache.json.
+    # On every boot the file is read first so yfinance is only called for tickers
+    # not yet in the file, or whose cached entry is marked as failed.
+    # This means a rate-limit on one boot never permanently poisons the value.
+    yf_currencies = _resolve_currencies(list(unique_tickers))
 
     INFO_DEFAULTS["currency"] = lambda t: yf_currencies.get(t, "USD")
 
@@ -184,7 +196,6 @@ def load_data():
         for field, default_fn in INFO_DEFAULTS.items():
             col = resolve_col(field)
             if field == "currency":
-                # Always use the resolved value — never re-read from a column here
                 rec[field] = yf_currencies[ticker]
                 continue
             if col is not None:
