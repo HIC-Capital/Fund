@@ -611,27 +611,27 @@ if st.sidebar.button("🏠 Home", use_container_width=True):
     st.session_state.main_page = "🏠 Home"
 
 if "main_page" not in st.session_state:
-    st.session_state.main_page = "🏠 Home"
-if st.sidebar.button("📋 Transactions", use_container_width=True):
-    st.session_state.main_page = "📋 Transactions"
+    st.session_state.main_page = "Home"
+if st.sidebar.button("Transactions", use_container_width=True):
+    st.session_state.main_page = "Transactions"
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 
-if st.sidebar.button("📱 TMT",             use_container_width=True): st.session_state.main_page = "📱 TMT Sector"
-if st.sidebar.button("🏦 FIG",             use_container_width=True): st.session_state.main_page = "🏦 FIG Sector"
-if st.sidebar.button("🏭 Industrials",     use_container_width=True): st.session_state.main_page = "🏭 Industrials Sector"
-if st.sidebar.button("⚡ PUI",             use_container_width=True): st.session_state.main_page = "⚡ PUI Sector"
-if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.session_state.main_page = "🛒 Consumer Goods Sector"
-if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "🏥 Healthcare Sector"
+if st.sidebar.button("📱 TMT",             use_container_width=True): st.session_state.main_page = "TMT Sector"
+if st.sidebar.button("🏦 FIG",             use_container_width=True): st.session_state.main_page = "FIG Sector"
+if st.sidebar.button("🏭 Industrials",     use_container_width=True): st.session_state.main_page = "Industrials Sector"
+if st.sidebar.button("⚡ PUI",             use_container_width=True): st.session_state.main_page = "PUI Sector"
+if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.session_state.main_page = "Consumer Goods Sector"
+if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "Healthcare Sector"
 
 main_page = st.session_state.main_page
 
 # =============================================================================
 # TRANSACTION HISTORY PAGE
 # =============================================================================
-if main_page == "📋 Transactions":
-    st.title("Transaction History")
+if main_page == "Transactions":
+    st.title("📋 Transaction History")
 
     @st.cache_data(show_spinner=False)
     def fetch_execution_prices(tx_df: pd.DataFrame) -> pd.Series:
@@ -747,8 +747,8 @@ if main_page == "📋 Transactions":
 # =============================================================================
 # HOME PAGE
 # =============================================================================
-elif main_page == "🏠 Home":
-    st.title("Portfolio Dashboard - Home")
+elif main_page == "Home":
+    st.title("🏠 Portfolio Dashboard - Home")
 
     if "home_tab" not in st.session_state:
         st.session_state.home_tab = "Generic Summary"
