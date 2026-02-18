@@ -7,27 +7,9 @@ import yfinance as yf
 import json, time
 from pathlib import Path
 
-# =============================================================================
-# LOAD TRANSACTION HISTORY & STATIC INFO FROM EXCEL
-# =============================================================================
-
-# =============================================================================
-# CURRENCY CACHE  — persists to disk so a cold-boot rate-limit never poisons values
-# =============================================================================
 _CCY_CACHE_FILE = Path("currency_cache.json")
 
 def _resolve_currencies(tickers: list[str]) -> dict[str, str]:
-    """
-    Return {ticker: currency_code} for every ticker in *tickers*.
-
-    Strategy per ticker:
-      1. Read from currency_cache.json  →  instant, survives reboots
-      2. If not cached (or previously failed): fetch from yfinance with retry
-      3. On success: write to cache file immediately so next boot is free
-      4. On persistent failure: leave out of cache so the next boot retries again
-         (never permanently store a wrong value)
-    """
-    # Load existing cache from disk
     disk_cache: dict = {}
     if _CCY_CACHE_FILE.exists():
         try:
@@ -39,30 +21,27 @@ def _resolve_currencies(tickers: list[str]) -> dict[str, str]:
     cache_dirty = False
 
     for ticker in tickers:
-        # Already cached and looks valid
         cached = disk_cache.get(ticker)
         if cached and isinstance(cached, str) and len(cached) == 3:
             result[ticker] = cached
             print(f"  {ticker}: {cached}  [disk cache]")
             continue
 
-        # Need to fetch from yfinance — retry up to 4 times with backoff
         ccy = None
         for attempt in range(4):
             try:
-                info = yf.Ticker(ticker).fast_info   # fast_info is lighter than .info
+                info = yf.Ticker(ticker).fast_info
                 raw_ccy = getattr(info, "currency", None)
                 if raw_ccy and isinstance(raw_ccy, str) and len(raw_ccy) == 3:
                     ccy = raw_ccy.upper()
                     break
-                # fast_info may not have it — try full .info
                 full = yf.Ticker(ticker).info
                 raw_ccy = full.get("currency")
                 if raw_ccy and isinstance(raw_ccy, str) and len(raw_ccy) == 3:
                     ccy = raw_ccy.upper()
                     break
             except Exception as e:
-                wait = 2 ** attempt          # 1 s, 2 s, 4 s, 8 s
+                wait = 2 ** attempt
                 print(f"  {ticker}: yfinance error ({e}), retrying in {wait}s…")
                 time.sleep(wait)
 
@@ -72,13 +51,11 @@ def _resolve_currencies(tickers: list[str]) -> dict[str, str]:
             cache_dirty         = True
             print(f"  {ticker}: {ccy}  [yfinance → cached]")
         else:
-            # Don't write a failed entry — next boot will retry
             result[ticker] = "USD"
             print(f"  {ticker}: could not resolve, defaulting to USD (not cached)")
 
-        time.sleep(0.3)   # gentle inter-ticker pause
+        time.sleep(0.3)
 
-    # Persist updated cache to disk
     if cache_dirty:
         try:
             _CCY_CACHE_FILE.write_text(json.dumps(disk_cache, indent=2))
@@ -177,9 +154,7 @@ def load_data():
                 return info_col_map[candidate]
         return None
 
-    # ── Currency resolution via yfinance with disk cache ──────────────────────
     yf_currencies = _resolve_currencies(list(unique_tickers))
-
     INFO_DEFAULTS["currency"] = lambda t: yf_currencies.get(t, "USD")
 
     detected = {field: resolve_col(field) for field in FIELD_CANDIDATES}
@@ -269,7 +244,6 @@ def build_portfolio(tx: pd.DataFrame, info_df: pd.DataFrame) -> dict:
 
 
 def _vwap_purchase_price(ticker: str, buys: pd.DataFrame) -> float:
-    """Weighted-average purchase price in NATIVE currency."""
     total_cost = 0.0
     total_qty  = 0
     for _, row in buys.iterrows():
@@ -297,7 +271,6 @@ def _fetch_close_on_date(ticker: str, date: pd.Timestamp) -> float | None:
         return None
 
 
-# ── Load & build ──────────────────────────────────────────────────────────────
 print("Loading transaction history…")
 _tx, _info_df = load_data()
 
@@ -307,66 +280,29 @@ portfolio_holdings = build_portfolio(_tx, _info_df)
 print(f"Active positions: {list(portfolio_holdings.keys())}")
 
 # =============================================================================
-# FX UTILITIES  (everything converts TO USD as the fund's base currency)
+# FX UTILITIES
 # =============================================================================
 
 NATIVE_TO_USD_PAIRS = {
-    "USD": None,
-    "EUR": "EURUSD=X",
-    "GBP": "GBPUSD=X",
-    "JPY": "JPYUSD=X",
-    "CHF": "CHFUSD=X",
-    "CAD": "CADUSD=X",
-    "AUD": "AUDUSD=X",
-    "HKD": "HKDUSD=X",
-    "INR": "INRUSD=X",
-    "CNY": "CNYUSD=X",
-    "SEK": "SEKUSD=X",
-    "NOK": "NOKUSD=X",
-    "DKK": "DKKUSD=X",
-    "SGD": "SGDUSD=X",
-    "KRW": "KRWUSD=X",
-    "BRL": "BRLUSD=X",
+    "USD": None, "EUR": "EURUSD=X", "GBP": "GBPUSD=X", "JPY": "JPYUSD=X",
+    "CHF": "CHFUSD=X", "CAD": "CADUSD=X", "AUD": "AUDUSD=X", "HKD": "HKDUSD=X",
+    "INR": "INRUSD=X", "CNY": "CNYUSD=X", "SEK": "SEKUSD=X", "NOK": "NOKUSD=X",
+    "DKK": "DKKUSD=X", "SGD": "SGDUSD=X", "KRW": "KRWUSD=X", "BRL": "BRLUSD=X",
     "MXN": "MXNUSD=X",
 }
 
 FALLBACK_FX_TO_USD = {
-    "USD": 1.0000,
-    "EUR": 1.0850,
-    "GBP": 1.2700,
-    "JPY": 0.0067,
-    "CHF": 1.1260,
-    "CAD": 0.7350,
-    "AUD": 0.6500,
-    "HKD": 0.1280,
-    "INR": 0.0120,
-    "CNY": 0.1380,
-    "SEK": 0.0940,
-    "NOK": 0.0940,
-    "DKK": 0.1440,
-    "SGD": 0.7450,
-    "KRW": 0.00073,
-    "BRL": 0.1900,
-    "MXN": 0.0580,
+    "USD": 1.0000, "EUR": 1.0850, "GBP": 1.2700, "JPY": 0.0067,
+    "CHF": 1.1260, "CAD": 0.7350, "AUD": 0.6500, "HKD": 0.1280,
+    "INR": 0.0120, "CNY": 0.1380, "SEK": 0.0940, "NOK": 0.0940,
+    "DKK": 0.1440, "SGD": 0.7450, "KRW": 0.00073, "BRL": 0.1900, "MXN": 0.0580,
 }
 
 NATIVE_TO_CHF_PAIRS = {
-    "USD": "USDCHF=X",
-    "EUR": "EURCHF=X",
-    "INR": "INRCHF=X",
-    "HKD": "HKDCHF=X",
-    "AUD": "AUDCHF=X",
-    "CAD": "CADCHF=X",
-    "GBP": "GBPCHF=X",
-    "JPY": "JPYCHF=X",
-    "CNY": "CNYCHF=X",
-    "SEK": "SEKCHF=X",
-    "NOK": "NOKCHF=X",
-    "DKK": "DKKCHF=X",
-    "SGD": "SGDCHF=X",
-    "KRW": "KRWCHF=X",
-    "BRL": "BRLCHF=X",
-    "MXN": "MXNCHF=X",
+    "USD": "USDCHF=X", "EUR": "EURCHF=X", "INR": "INRCHF=X", "HKD": "HKDCHF=X",
+    "AUD": "AUDCHF=X", "CAD": "CADCHF=X", "GBP": "GBPCHF=X", "JPY": "JPYCHF=X",
+    "CNY": "CNYCHF=X", "SEK": "SEKCHF=X", "NOK": "NOKCHF=X", "DKK": "DKKCHF=X",
+    "SGD": "SGDCHF=X", "KRW": "KRWCHF=X", "BRL": "BRLCHF=X", "MXN": "MXNCHF=X",
     "CHF": None,
 }
 FALLBACK_FX_TO_CHF = {
@@ -394,7 +330,6 @@ def _fetch_fx_series(currency: str, start, end, target: str = "USD") -> pd.DataF
     pair = _get_yf_pair(currency, target)
     if pair is None:
         return None
-
     key = (pair, str(start), str(end))
     if key not in _fx_series_cache:
         try:
@@ -441,9 +376,9 @@ def _spot_fx(currency: str, target: str = "USD") -> float:
 import statistics as _stats
 
 _SECTOR_ETFS = {
-    "TMT":"XLK","FIG":"XLF","Industrials":"XLI","PUI":"XLB",
-    "Consumer Goods":"XLP","Healthcare":"XLV",
-    "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
+    "TMT": "XLK", "FIG": "XLF", "Industrials": "XLI", "PUI": "XLB",
+    "Consumer Goods": "XLP", "Healthcare": "XLV",
+    "Real Estate": "XLRE", "Energy": "XLE", "Utilities": "XLU",
 }
 _SECTOR_PROXIES = {
     "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
@@ -466,16 +401,12 @@ _ALL_RATIO_COLS = (
 def _yf_info_with_retry(ticker: str, max_attempts: int = 4, base_delay: float = 3.0):
     CORE_FIELDS = ("marketCap", "trailingPE", "priceToBook",
                    "returnOnEquity", "currentPrice", "regularMarketPrice")
-
     for attempt in range(max_attempts):
         try:
             info = yf.Ticker(ticker).info
             if info and any(info.get(f) is not None for f in CORE_FIELDS):
                 return info, None
-            raise ValueError(
-                f"Rate-limit stub returned — none of {CORE_FIELDS} populated "
-                f"({len(info)} keys total)"
-            )
+            raise ValueError(f"Rate-limit stub returned — none of {CORE_FIELDS} populated ({len(info)} keys total)")
         except Exception as e:
             err = str(e)
             if attempt < max_attempts - 1:
@@ -559,11 +490,7 @@ def fetch_sector_industry_avg(sector: str) -> dict:
 # =============================================================================
 # PAGE CONFIG & CUSTOM CSS
 # =============================================================================
-st.set_page_config(
-    page_title="Portfolio Analysis Dashboard",
-    page_icon="",
-    layout="wide",
-)
+st.set_page_config(page_title="Portfolio Analysis Dashboard", page_icon="", layout="wide")
 
 st.markdown("""
     <style>
@@ -579,6 +506,7 @@ st.markdown("""
         color: #0F1D64; font-size: 16px; font-weight: 500;
         transition: all 0.3s ease;
     }
+    div.stButton > button::first-line { font-weight: 700; font-size: 18px; }
     div.stButton > button:hover {
         background-color: #0F1D64; color: white; border-color: #0F1D64;
         transform: translateY(-2px); box-shadow: 0 4px 12px rgba(15,29,100,0.3);
@@ -596,7 +524,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# SIDEBAR
+# SIDEBAR  — buttons set PLAIN STRING keys, emojis only on button labels
 # =============================================================================
 st.sidebar.title("Navigation")
 
@@ -607,23 +535,22 @@ except Exception:
     st.sidebar.markdown("### Portfolio Dashboard")
     st.sidebar.markdown("---")
 
-if st.sidebar.button("🏠 Home", use_container_width=True):
-    st.session_state.main_page = "🏠 Home"
+if st.sidebar.button("🏠 Home",           use_container_width=True): st.session_state.main_page = "Home"
+if st.sidebar.button("📋 Transactions",   use_container_width=True): st.session_state.main_page = "Transactions"
 
 if "main_page" not in st.session_state:
     st.session_state.main_page = "Home"
-if st.sidebar.button("Transactions", use_container_width=True):
-    st.session_state.main_page = "Transactions"
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 
-if st.sidebar.button("📱 TMT",             use_container_width=True): st.session_state.main_page = "📱 TMT Sector"
-if st.sidebar.button("🏦 FIG",             use_container_width=True): st.session_state.main_page = "🏦 FIG Sector"
-if st.sidebar.button("🏭 Industrials",     use_container_width=True): st.session_state.main_page = "🏭 Industrials Sector"
-if st.sidebar.button("⚡ PUI",             use_container_width=True): st.session_state.main_page = "⚡ PUI Sector"
-if st.sidebar.button("🛒 Consumer Goods",  use_container_width=True): st.session_state.main_page = "🛒 Consumer Goods Sector"
-if st.sidebar.button("🏥 Healthcare",      use_container_width=True): st.session_state.main_page = "🏥 Healthcare Sector"
+# Keys are plain sector names — NO emojis
+if st.sidebar.button("📱 TMT",            use_container_width=True): st.session_state.main_page = "TMT"
+if st.sidebar.button("🏦 FIG",            use_container_width=True): st.session_state.main_page = "FIG"
+if st.sidebar.button("🏭 Industrials",    use_container_width=True): st.session_state.main_page = "Industrials"
+if st.sidebar.button("⚡ PUI",            use_container_width=True): st.session_state.main_page = "PUI"
+if st.sidebar.button("🛒 Consumer Goods", use_container_width=True): st.session_state.main_page = "Consumer Goods"
+if st.sidebar.button("🏥 Healthcare",     use_container_width=True): st.session_state.main_page = "Healthcare"
 
 main_page = st.session_state.main_page
 
@@ -631,7 +558,7 @@ main_page = st.session_state.main_page
 # TRANSACTION HISTORY PAGE
 # =============================================================================
 if main_page == "Transactions":
-    st.title("📋 Transaction History")
+    st.title("Transaction History")
 
     @st.cache_data(show_spinner=False)
     def fetch_execution_prices(tx_df: pd.DataFrame) -> pd.Series:
@@ -668,7 +595,7 @@ if main_page == "Transactions":
             return str(_info_df.loc[ticker, "currency"])
         return ""
 
-    display_tx["Currency"] = display_tx["Ticker"].apply(get_ticker_currency)
+    display_tx["Currency"]    = display_tx["Ticker"].apply(get_ticker_currency)
     display_tx["Gross Value"] = display_tx.apply(
         lambda r: r["Exec Price"] * r["Quantity"] if pd.notna(r["Exec Price"]) else None, axis=1
     )
@@ -710,16 +637,13 @@ if main_page == "Transactions":
         t: _spot_fx(portfolio_holdings.get(t, {}).get("currency", "USD"), "USD")
         for t in bubble_tx["Ticker"].unique()
     }
-
     bubble_tx["exec_price_usd"] = bubble_tx.apply(
         lambda r: r["exec_price"] * spot_usd_rates.get(r["Ticker"], 1.0)
         if pd.notna(r["exec_price"]) else None, axis=1
     )
     bubble_tx["gross_value"] = bubble_tx.apply(
-        lambda r: r["exec_price_usd"] * r["Quantity"] if pd.notna(r["exec_price_usd"]) else r["Quantity"],
-        axis=1
+        lambda r: r["exec_price_usd"] * r["Quantity"] if pd.notna(r["exec_price_usd"]) else r["Quantity"], axis=1
     )
-
     global_max_val = bubble_tx["gross_value"].max()
     bubble_tx["bubble_size"] = (bubble_tx["gross_value"] / global_max_val) * 42 + 8
 
@@ -728,14 +652,10 @@ if main_page == "Transactions":
     for action in ["Buy", "Sell"]:
         subset = bubble_tx[bubble_tx["Action"] == action]
         fig.add_trace(go.Scatter(
-            x=subset["Date"], y=subset["Ticker"],
-            mode="markers",
+            x=subset["Date"], y=subset["Ticker"], mode="markers",
             marker=dict(color=colors[action], size=subset["bubble_size"], opacity=0.8, sizemode="diameter"),
             name=action,
-            hovertemplate=(
-                "<b>%{y}</b><br>Date: %{x}<br>"
-                "Qty: %{customdata[0]:,}<br>Value (USD): $%{customdata[1]:,.0f}<extra></extra>"
-            ),
+            hovertemplate="<b>%{y}</b><br>Date: %{x}<br>Qty: %{customdata[0]:,}<br>Value (USD): $%{customdata[1]:,.0f}<extra></extra>",
             customdata=subset[["Quantity", "gross_value"]].values,
         ))
     fig.update_layout(
@@ -748,12 +668,12 @@ if main_page == "Transactions":
 # HOME PAGE
 # =============================================================================
 elif main_page == "Home":
-    st.title("🏠 Portfolio Dashboard - Home")
+    st.title("Portfolio Dashboard - Home")
 
     if "home_tab" not in st.session_state:
         st.session_state.home_tab = "Generic Summary"
 
-    st.markdown("### Select Analysis Type")
+    st.markdown("### **Select Analysis Type**")
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Generic Summary\n\nKey metrics, performance vs MSCI World, portfolio treemap",
@@ -818,12 +738,10 @@ elif main_page == "Home":
                     def get_rate_usd(currency, date):
                         return _fx_rate_on_date(currency, date, fx_series_usd.get(currency), "USD")
 
-                    # ── Risk Metrics ──────────────────────────────────────────
                     st.markdown("### **Portfolio Risk Metrics**")
 
                     with st.spinner("Calculating Sharpe, Alpha & Beta…"):
                         all_dates = msci_close.index
-
                         first_trade_date = pd.Timestamp(_tx["Date"].min()).normalize()
                         active_dates = all_dates[all_dates >= first_trade_date]
 
@@ -831,7 +749,6 @@ elif main_page == "Home":
                             st.warning("Not enough trading days after the first trade to compute reliable risk metrics.")
                         else:
                             portfolio_values = pd.Series(index=active_dates, dtype=float)
-
                             for date in active_dates:
                                 daily_value = 0.0
                                 for ticker, info in portfolio_holdings.items():
@@ -844,7 +761,6 @@ elif main_page == "Home":
 
                             first_nonzero = portfolio_values[portfolio_values > 0].index.min()
                             portfolio_values = portfolio_values.loc[first_nonzero:]
-
                             port_ret = portfolio_values.pct_change().dropna()
 
                             bad_ret = port_ret[port_ret.abs() > 0.25]
@@ -898,7 +814,7 @@ elif main_page == "Home":
                                 c3.metric("Alpha (Annualized)",   f"{alpha_annual*100:.2f}%")
 
                                 c1, c2, c3 = st.columns(3)
-                                c1.metric("Portfolio Vol (Ann.)", f"{port_vol_ann:.1f}%")
+                                c1.metric("Portfolio Vol (Ann.)",  f"{port_vol_ann:.1f}%")
                                 c2.metric("MSCI World Vol (Ann.)", f"{msci_vol_ann:.1f}%")
                                 c3.metric("R² (vs MSCI World)",   f"{r_squared:.2f}")
 
@@ -919,7 +835,6 @@ elif main_page == "Home":
                     st.markdown("---")
 
                     FUND_SIZE_USD = 1_000_000.0
-
                     all_tx = _tx.sort_values("Date").reset_index(drop=True)
                     tx_by_date: dict = {}
                     for _, tx_row in all_tx.iterrows():
@@ -927,7 +842,6 @@ elif main_page == "Home":
                         tx_by_date.setdefault(d, []).append(tx_row)
 
                     dates = msci_close.index
-
                     nav_usd_list    = []
                     equity_usd_list = []
                     cash_usd_list   = []
@@ -940,19 +854,15 @@ elif main_page == "Home":
 
                     for date in dates:
                         date_norm = pd.Timestamp(date).normalize()
-
                         for tx_row in tx_by_date.get(date_norm, []):
                             ticker = tx_row["Ticker"]
                             qty    = int(tx_row["Quantity"])
                             action = tx_row["Action"]
-
                             price_native = get_price_native(ticker, date, portfolio_data)
                             if price_native is None:
                                 price_native = portfolio_holdings.get(ticker, {}).get("purchase_price", 0.0)
-
                             ccy = portfolio_holdings.get(ticker, {}).get("currency", "USD")
                             price_usd = price_native * get_rate_usd(ccy, date)
-
                             if action == "Buy":
                                 cash_usd -= price_usd * qty
                                 live_shares[ticker] = live_shares.get(ticker, 0) + qty
@@ -979,9 +889,7 @@ elif main_page == "Home":
                     equity_series = pd.Series(equity_usd_list, index=dates)
                     cash_series   = pd.Series(cash_usd_list,   index=dates)
 
-                    # ── Performance chart ─────────────────────────────────────
                     st.markdown("### **Portfolio vs MSCI World Performance**")
-
                     port_norm = nav_series / FUND_SIZE_USD * 100
                     msci_norm = msci_close / msci_close.iloc[0] * 100
 
@@ -1007,7 +915,6 @@ elif main_page == "Home":
                     )
                     st.plotly_chart(fig_perf, use_container_width=True)
 
-                    # ── Key metrics ───────────────────────────────────────────
                     final_nav    = nav_series.iloc[-1]
                     final_cash   = cash_series.iloc[-1]
                     final_equity = equity_series.iloc[-1]
@@ -1017,10 +924,10 @@ elif main_page == "Home":
                     cash_pct       = final_cash / final_nav * 100 if final_nav > 0 else 0
 
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Fund NAV (USD)",    f"${final_nav:,.0f}",      delta=f"{port_ret_total:.2f}% vs $1M")
+                    c1.metric("Fund NAV (USD)",     f"${final_nav:,.0f}",     delta=f"{port_ret_total:.2f}% vs $1M")
                     c2.metric("Equity Value (USD)", f"${final_equity:,.0f}",  delta=f"{final_equity/final_nav*100:.1f}% of NAV")
-                    c3.metric("Cash (USD)",         f"${final_cash:,.0f}",    delta=f"{cash_pct:.1f}% of NAV")
-                    c4.metric("vs MSCI World",      f"{outperf:+.2f}%",       delta=f"{outperf:+.2f}%")
+                    c3.metric("Cash (USD)",          f"${final_cash:,.0f}",   delta=f"{cash_pct:.1f}% of NAV")
+                    c4.metric("vs MSCI World",       f"{outperf:+.2f}%",      delta=f"{outperf:+.2f}%")
 
                     st.info(f"""
 **Fund Summary (all amounts in USD):** Initial capital **$1,000,000** | 
@@ -1029,7 +936,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 *Non-USD positions (e.g. INR, HKD) are converted to USD using live FX rates.*
 """)
 
-                    # ── Treemap ───────────────────────────────────────────────
                     st.markdown("### **Portfolio Composition Treemap** (USD)")
                     treemap_data = []
                     final_date   = dates[-1]
@@ -1063,9 +969,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                             "ticker": ticker, "name": info.get("name", ticker),
                             "weight": curr_val / final_nav * 100,
                             "performance": perf, "value": curr_val,
-                            "currency": ccy,
-                            "price_native": price_native,
-                            "price_usd": price_usd,
+                            "currency": ccy, "price_native": price_native, "price_usd": price_usd,
                         })
 
                     treemap_data.append({
@@ -1091,24 +995,20 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     fig_tm.update_layout(height=600, margin=dict(t=50, l=0, r=0, b=0))
                     st.plotly_chart(fig_tm, use_container_width=True)
 
-                    # ── Holdings table ────────────────────────────────────────
                     st.markdown("### **Holdings Details** (USD, all FX converted)")
                     ht = treemap_df.copy()
                     ht["Return (%)"]   = ht["performance"].apply(lambda x: f"{x:.2f}%")
                     ht["Weight (%)"]   = ht["weight"].apply(lambda x: f"{x:.2f}%")
                     ht["Value (USD)"]  = ht["value"].apply(lambda x: f"${x:,.0f}")
                     ht["Native Price"] = ht.apply(
-                        lambda r: f"{r['price_native']:.2f} {r['currency']}" if r["ticker"] != "CASH" else "—",
-                        axis=1
+                        lambda r: f"{r['price_native']:.2f} {r['currency']}" if r["ticker"] != "CASH" else "—", axis=1
                     )
-                    ht["USD Price"]    = ht.apply(
-                        lambda r: f"${r['price_usd']:.4f}" if r["ticker"] != "CASH" else "—",
-                        axis=1
+                    ht["USD Price"] = ht.apply(
+                        lambda r: f"${r['price_usd']:.4f}" if r["ticker"] != "CASH" else "—", axis=1
                     )
                     ht = ht[["name","ticker","currency","Native Price","USD Price","Weight (%)","Return (%)","Value (USD)"]]
                     ht.columns = ["Company","Ticker","Native Ccy","Native Price","USD Price","Weight","Return","Value (USD)"]
-                    st.dataframe(ht.sort_values("Return", ascending=False),
-                                 use_container_width=True, hide_index=True)
+                    st.dataframe(ht.sort_values("Return", ascending=False), use_container_width=True, hide_index=True)
 
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
@@ -1123,18 +1023,12 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
         @st.cache_data(show_spinner=False)
         def fetch_hq_countries(tickers: tuple) -> dict:
             EXCHANGE_COUNTRY_FALLBACK = {
-                ".NS": "India", ".BO": "India",
-                ".DE": "Germany", ".F": "Germany",
-                ".SW": "Switzerland", ".PA": "France",
-                ".AS": "Netherlands", ".L": "United Kingdom",
-                ".HK": "Hong Kong", ".AX": "Australia",
-                ".TO": "Canada", ".V": "Canada",
-                ".T": "Japan", ".KS": "South Korea",
-                ".SS": "China", ".SZ": "China",
-                ".BR": "Belgium", ".ST": "Sweden",
-                ".CO": "Denmark", ".OL": "Norway",
-                ".HE": "Finland", ".LS": "Portugal",
-                ".MC": "Spain", ".MI": "Italy",
+                ".NS": "India", ".BO": "India", ".DE": "Germany", ".F": "Germany",
+                ".SW": "Switzerland", ".PA": "France", ".AS": "Netherlands", ".L": "United Kingdom",
+                ".HK": "Hong Kong", ".AX": "Australia", ".TO": "Canada", ".V": "Canada",
+                ".T": "Japan", ".KS": "South Korea", ".SS": "China", ".SZ": "China",
+                ".BR": "Belgium", ".ST": "Sweden", ".CO": "Denmark", ".OL": "Norway",
+                ".HE": "Finland", ".LS": "Portugal", ".MC": "Spain", ".MI": "Italy",
                 ".LI": "Liechtenstein",
             }
             result = {}
@@ -1256,12 +1150,8 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
             tx_start = all_tx_sorted["Date"].min()
             tx_end   = pd.Timestamp.today()
-            used_ccys = {portfolio_holdings.get(t, {}).get("currency", "USD")
-                         for t in all_tx_sorted["Ticker"].unique()}
-            fx_series_struct = {
-                ccy: _fetch_fx_series(ccy, tx_start, tx_end, "USD")
-                for ccy in used_ccys
-            }
+            used_ccys = {portfolio_holdings.get(t, {}).get("currency", "USD") for t in all_tx_sorted["Ticker"].unique()}
+            fx_series_struct = {ccy: _fetch_fx_series(ccy, tx_start, tx_end, "USD") for ccy in used_ccys}
 
             for _, tx_row in all_tx_sorted.iterrows():
                 t          = tx_row["Ticker"]
@@ -1269,29 +1159,23 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 action     = tx_row["Action"]
                 trade_date = tx_row["Date"]
                 ccy        = portfolio_holdings.get(t, {}).get("currency", "USD")
-
                 price_native = _fetch_close_on_date(t, trade_date)
                 if price_native is None:
                     price_native = portfolio_holdings.get(t, {}).get("purchase_price", 0.0)
-
                 fx_rate   = _fx_rate_on_date(ccy, trade_date, fx_series_struct.get(ccy), "USD")
                 price_usd = price_native * fx_rate
-
                 if action == "Buy":
                     cash_usd -= price_usd * qty
                 elif action == "Sell":
                     cash_usd += price_usd * qty
 
-            cash_usd = max(cash_usd, 0.0)
-
+            cash_usd      = max(cash_usd, 0.0)
             total_nav_usd = total_equity_usd + cash_usd
 
             for h in holdings_analysis:
                 h["weight_nav"] = h["value_usd"] / total_nav_usd  * 100 if total_nav_usd  > 0 else 0
                 h["weight_eq"]  = h["value_usd"] / total_equity_usd * 100 if total_equity_usd > 0 else 0
-
-            for h in holdings_analysis:
-                h["weight"] = h["weight_nav"]
+                h["weight"]     = h["weight_nav"]
 
             df_an = pd.DataFrame(holdings_analysis)
             blue  = ["#0F1D64","#1E3A8A","#3B82F6","#60A5FA","#93C5FD","#DBEAFE"]
@@ -1309,10 +1193,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             sec_data = df_an.groupby("sector")["weight"].sum().reset_index()
             sec_data.columns = ["Sector","Weight (%)"]
             if cash_pct > 0:
-                sec_data = pd.concat([
-                    sec_data,
-                    pd.DataFrame([{"Sector": "Cash (USD)", "Weight (%)": cash_pct}])
-                ], ignore_index=True)
+                sec_data = pd.concat([sec_data, pd.DataFrame([{"Sector": "Cash (USD)", "Weight (%)": cash_pct}])], ignore_index=True)
 
             c1, c2 = st.columns([2,1])
             with c1:
@@ -1323,7 +1204,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_s.update_layout(height=400)
                 st.plotly_chart(fig_s, use_container_width=True)
             with c2:
-                st.markdown("### Sector Breakdown")
+                st.markdown("### **Sector Breakdown**")
                 for _, r in sec_data.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Sector"], f"{r['Weight (%)']:.1f}%")
 
@@ -1343,13 +1224,13 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_map.update_layout(height=450, margin=dict(l=0,r=0,t=40,b=0))
                 st.plotly_chart(fig_map, use_container_width=True)
             with c2:
-                st.markdown("### Regional Allocation")
+                st.markdown("### **Regional Allocation**")
                 reg_alloc = df_an.groupby("region")["weight"].sum().reset_index()
                 reg_alloc.columns = ["Region","Weight (%)"]
                 for _, r in reg_alloc.sort_values("Weight (%)", ascending=False).iterrows():
                     st.metric(r["Region"], f"{r['Weight (%)']:.1f}%")
                 st.markdown("---")
-                st.markdown("### Top Countries")
+                st.markdown("### **Top Countries**")
                 st.dataframe(cnt_alloc[["Country","Weight (%)"]].sort_values("Weight (%)", ascending=False)
                              .style.format({"Weight (%)":"{:.1f}%"}), use_container_width=True, hide_index=True)
 
@@ -1370,10 +1251,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 if existing_usd > 0:
                     cur_data.loc[cur_data["Currency"]=="USD","Weight (%)"] += cash_pct
                 else:
-                    cur_data = pd.concat([
-                        cur_data,
-                        pd.DataFrame([{"Currency":"USD (cash)","Weight (%)": cash_pct}])
-                    ], ignore_index=True)
+                    cur_data = pd.concat([cur_data, pd.DataFrame([{"Currency":"USD (cash)","Weight (%)": cash_pct}])], ignore_index=True)
                 fig_cur = px.pie(cur_data, values="Weight (%)", names="Currency",
                                  title="Currency Exposure incl. Cash (% of NAV)",
                                  color_discrete_sequence=blue)
@@ -1393,7 +1271,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 st.metric("HHI Index (equity only)", f"{hhi:.0f}")
                 st.caption("✅ Well diversified" if hhi < 1000 else "⚠️ Moderately concentrated" if hhi < 1800 else "🔴 Highly concentrated")
 
-            st.markdown("### Top 10 Holdings by Weight (% of NAV)")
+            st.markdown("### **Top 10 Holdings** by Weight (% of NAV)")
             th = df_sorted[["name","sector","country","currency","value_usd","weight"]].head(10).copy()
             th["value_usd"] = th["value_usd"].apply(lambda x: f"${x:,.0f}")
             th["weight"]    = th["weight"].apply(lambda x: f"{x:.2f}%")
@@ -1423,16 +1301,12 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 try:
                     hist = yf.Ticker(ticker).history(period="1y")
                     if not hist.empty:
-                        stock_data[ticker] = {
-                            "current_price": hist["Close"].iloc[-1],
-                            "historical": hist,
-                        }
+                        stock_data[ticker] = {"current_price": hist["Close"].iloc[-1], "historical": hist}
                 except Exception as e:
                     st.error(f"Error fetching data for {ticker}: {e}")
 
         forecast_method = st.tabs(["Monte Carlo Simulation", "Analyst Consensus", "DCF Analysis"])
 
-        # ── Monte Carlo ──────────────────────────────────────────────────────
         with forecast_method[0]:
             st.markdown("### **Monte Carlo Simulation**")
             st.markdown("Probabilistic portfolio performance projections (values in USD, all FX converted)")
@@ -1442,8 +1316,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             with c2: time_h  = st.number_input("Horizon (days)",  30,  1825,  252,  30)
             with c3:
                 tot_val = sum(
-                    stock_data[t]["current_price"]
-                    * portfolio_holdings[t]["quantity"]
+                    stock_data[t]["current_price"] * portfolio_holdings[t]["quantity"]
                     * _spot_fx(portfolio_holdings[t]["currency"], "USD")
                     for t in portfolio_holdings if t in stock_data
                 )
@@ -1452,17 +1325,14 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             if st.button("Run Monte Carlo Simulation", type="primary"):
                 with st.spinner("Running simulations…"):
                     pv = {
-                        t: stock_data[t]["current_price"]
-                           * portfolio_holdings[t]["quantity"]
+                        t: stock_data[t]["current_price"] * portfolio_holdings[t]["quantity"]
                            * _spot_fx(portfolio_holdings[t]["currency"], "USD")
                         for t in portfolio_holdings if t in stock_data
                     }
                     tot = sum(pv.values())
                     wts = {t: pv[t] / tot for t in pv}
-                    ret_data = {
-                        t: stock_data[t]["historical"]["Close"].pct_change().dropna()
-                        for t in portfolio_holdings if t in stock_data
-                    }
+                    ret_data = {t: stock_data[t]["historical"]["Close"].pct_change().dropna()
+                                for t in portfolio_holdings if t in stock_data}
                     ret_df = pd.DataFrame(ret_data).dropna()
 
                     if ret_df.empty or len(ret_df) < 30:
@@ -1487,19 +1357,15 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
 
                         fig = go.Figure()
                         for i in range(0, num_sim, max(1, num_sim // 100)):
-                            fig.add_trace(go.Scatter(x=list(range(time_h)), y=sims[:, i],
-                                                     mode="lines", line=dict(width=0.5, color="lightgray"),
+                            fig.add_trace(go.Scatter(x=list(range(time_h)), y=sims[:, i], mode="lines",
+                                                     line=dict(width=0.5, color="lightgray"),
                                                      showlegend=False, hoverinfo="skip"))
-                        for arr, name, color in [(p5,"5th %ile (Bear)","red"),
-                                                 (p50,"50th %ile (Base)","blue"),
-                                                 (p95,"95th %ile (Bull)","green")]:
-                            fig.add_trace(go.Scatter(x=list(range(time_h)), y=arr,
-                                                     mode="lines", name=name, line=dict(color=color, width=3)))
-                        fig.update_layout(
-                            title=f"Monte Carlo: {num_sim} scenarios over {time_h} days (USD)",
-                            xaxis_title="Days", yaxis_title="Portfolio Value (USD)",
-                            height=500, hovermode="x unified",
-                        )
+                        for arr, name, color in [(p5,"5th %ile (Bear)","red"),(p50,"50th %ile (Base)","blue"),(p95,"95th %ile (Bull)","green")]:
+                            fig.add_trace(go.Scatter(x=list(range(time_h)), y=arr, mode="lines",
+                                                     name=name, line=dict(color=color, width=3)))
+                        fig.update_layout(title=f"Monte Carlo: {num_sim} scenarios over {time_h} days (USD)",
+                                          xaxis_title="Days", yaxis_title="Portfolio Value (USD)",
+                                          height=500, hovermode="x unified")
                         st.plotly_chart(fig, use_container_width=True)
 
                         c1, c2, c3, c4 = st.columns(4)
@@ -1507,7 +1373,6 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                                 (c3,p95[-1],"Bull (95th)"),(c4,np.mean(sims[-1,:]),"Expected (Mean)")]:
                             col.metric(label, f"${val:,.0f}", f"{(val-init_inv)/init_inv*100:.1f}%")
 
-        # ── Analyst Consensus ────────────────────────────────────────────────
         with forecast_method[1]:
             st.markdown("### **Analyst Consensus Forecast**")
             st.caption("Target prices are in native currency; values converted to USD for comparison.")
@@ -1531,13 +1396,10 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                             "Ticker": ticker, "Currency": ccy,
                             f"Current Price ({ccy})": cp_native,
                             f"Target Price ({ccy})": tp_native,
-                            "Current Price (USD)": cp_usd,
-                            "Target Price (USD)": tp_usd,
-                            "Upside/Downside": up,
-                            "Analysts": info_.get("numberOfAnalystOpinions", 0),
+                            "Current Price (USD)": cp_usd, "Target Price (USD)": tp_usd,
+                            "Upside/Downside": up, "Analysts": info_.get("numberOfAnalystOpinions", 0),
                             "Recommendation": info_.get("recommendationKey", "N/A").upper(),
-                            "Current Value (USD)": cv,
-                            "Projected Value (USD)": pv_,
+                            "Current Value (USD)": cv, "Projected Value (USD)": pv_,
                             "Potential Gain (USD)": pv_ - cv,
                         })
                 except Exception as e:
@@ -1550,16 +1412,14 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 tg  = da["Potential Gain (USD)"].sum()
                 wu  = tg / tc * 100 if tc > 0 else 0
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Current Portfolio Value (USD)",  f"${tc:,.0f}")
-                c2.metric("Projected Value (12M, USD)",     f"${tp_:,.0f}", f"{wu:.1f}%")
-                c3.metric("Potential Gain (USD)",           f"${tg:,.0f}")
-
+                c1.metric("Current Portfolio Value (USD)", f"${tc:,.0f}")
+                c2.metric("Projected Value (12M, USD)",    f"${tp_:,.0f}", f"{wu:.1f}%")
+                c3.metric("Potential Gain (USD)",          f"${tg:,.0f}")
                 dd = da.copy()
                 for col in ["Current Price (USD)","Target Price (USD)","Current Value (USD)","Projected Value (USD)","Potential Gain (USD)"]:
                     dd[col] = dd[col].apply(lambda x: f"${x:,.2f}")
                 dd["Upside/Downside"] = dd["Upside/Downside"].apply(lambda x: f"{x:.1f}%")
                 st.dataframe(dd, use_container_width=True, hide_index=True)
-
                 fig = go.Figure(go.Bar(
                     x=da["Ticker"], y=da["Upside/Downside"],
                     marker_color=["green" if x > 0 else "red" for x in da["Upside/Downside"]],
@@ -1570,17 +1430,15 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             else:
                 st.warning("No analyst consensus data available.")
 
-        # ── DCF ──────────────────────────────────────────────────────────────
         with forecast_method[2]:
             st.markdown("### **DCF Analysis**")
             st.info("Simplified DCF model — values remain in the stock's native currency.")
-            sel = st.selectbox("Select Stock for DCF Analysis",
-                               [t for t in portfolio_holdings if t in stock_data])
+            sel = st.selectbox("Select Stock for DCF Analysis", [t for t in portfolio_holdings if t in stock_data])
             if sel:
                 ccy_sel = portfolio_holdings[sel]["currency"]
                 c1, c2  = st.columns(2)
                 with c1:
-                    st.subheader(f"Input Parameters ({ccy_sel})")
+                    st.markdown(f"### **Input Parameters** ({ccy_sel})")
                     try:
                         cf = yf.Ticker(sel).cashflow
                         fcf_default = int(abs(cf.loc["Free Cash Flow"].iloc[0])) if not cf.empty and "Free Cash Flow" in cf.index else 1_000_000_000
@@ -1596,7 +1454,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     shares = st.number_input("Shares Outstanding", 1_000_000, value=so, step=1_000_000)
 
                 with c2:
-                    st.subheader(f"DCF Calculation ({ccy_sel})")
+                    st.markdown(f"### **DCF Calculation** ({ccy_sel})")
                     pf = [fcf_in * (1 + gr / 100) ** y for y in range(1, py + 1)]
                     pv = [pf[i] / (1 + wacc_ / 100) ** (i + 1) for i in range(py)]
                     tv = pf[-1] * (1 + tg / 100) / (wacc_ / 100 - tg / 100)
@@ -1627,33 +1485,36 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     else:          st.info("Fairly valued (within ±20%)")
 
 # =============================================================================
-# SECTOR PAGES
+# SECTOR PAGES  — main_page is now the plain sector name, e.g. "TMT"
 # =============================================================================
-elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector",
-                   "⚡ PUI Sector","🛒 Consumer Goods Sector","🏥 Healthcare Sector"]:
-                       
-    sector_name = main_page.replace(" Sector", "")
-    st.title(f"{sector_name} Sector Analysis")
+elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Healthcare"]:
+
+    sector_name = main_page   # already clean, e.g. "TMT", "Consumer Goods"
+    st.title(f"{sector_name} — Sector Analysis")
 
     sector_holdings = {k: v for k, v in portfolio_holdings.items() if v["sector"] == sector_name}
 
     if not sector_holdings:
-        st.warning(f"No holdings found in {sector_name} sector.")
+        st.warning(f"No holdings found in the {sector_name} sector. "
+                   f"Make sure the 'sector' column in your Excel file matches exactly: '{sector_name}'")
     else:
         if "sector_tab" not in st.session_state:
             st.session_state.sector_tab = "Performance Analysis"
 
-        st.markdown("### Select Analysis Type")
+        st.markdown("### **Select Analysis Type**")
         c1, c2, c3 = st.columns(3)
         with c1:
             if st.button("Performance Analysis", key=f"perf_{sector_name}", use_container_width=True):
-                st.session_state.sector_tab = "Performance Analysis"; st.rerun()
+                st.session_state.sector_tab = "Performance Analysis"
+                st.rerun()
         with c2:
             if st.button("Financial Analysis", key=f"fin_{sector_name}", use_container_width=True):
-                st.session_state.sector_tab = "Financial Analysis"; st.rerun()
+                st.session_state.sector_tab = "Financial Analysis"
+                st.rerun()
         with c3:
             if st.button("Company Specific", key=f"spec_{sector_name}", use_container_width=True):
-                st.session_state.sector_tab = "Company Specific"; st.rerun()
+                st.session_state.sector_tab = "Company Specific"
+                st.rerun()
 
         st.markdown("---")
         sector_tab = st.session_state.sector_tab
@@ -1662,9 +1523,11 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
         if sector_tab == "Performance Analysis":
             st.markdown(f"## **Performance Analysis** — {sector_name}")
 
-            benchmarks = {"TMT":"XLK","FIG":"XLF","Industrials":"XLI",
-                          "PUI":"XLB","Consumer Goods":"XLP","Healthcare":"XLV"}
-            bm_ticker  = benchmarks.get(sector_name, "URTH")
+            benchmarks = {
+                "TMT": "XLK", "FIG": "XLF", "Industrials": "XLI",
+                "PUI": "XLB", "Consumer Goods": "XLP", "Healthcare": "XLV",
+            }
+            bm_ticker = benchmarks.get(sector_name, "URTH")
 
             c1, c2 = st.columns(2)
             with c1: start_date = st.date_input("Start Date", pd.to_datetime("2025-11-06"), key=f"s_{sector_name}")
@@ -1677,7 +1540,7 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                     try:
                         from scipy import stats as scipy_stats
                         with st.spinner(f"Fetching {sector_name} data…"):
-                            bm_data = yf.download(bm_ticker, start=start_date, end=end_date, progress=False)
+                            bm_data  = yf.download(bm_ticker, start=start_date, end=end_date, progress=False)
                             bm_close = bm_data["Close"].iloc[:,0] if isinstance(bm_data["Close"],pd.DataFrame) else bm_data["Close"]
 
                             used_ccy_s = {info["currency"] for info in sector_holdings.values()}
@@ -1709,7 +1572,7 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                             _tx[_tx["Ticker"].isin(sector_holdings.keys())]["Date"].min()
                         ).normalize()
                         active_sec_dates = all_dates[all_dates >= sector_first_trade]
-                        sec_vals  = pd.Series(index=active_sec_dates, dtype=float)
+                        sec_vals = pd.Series(index=active_sec_dates, dtype=float)
                         for date in active_sec_dates:
                             dv = 0.0
                             for ticker, info in sector_holdings.items():
@@ -1720,12 +1583,11 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
 
                         first_nonzero_s = sec_vals[sec_vals > 0].index.min()
                         sec_vals        = sec_vals.loc[first_nonzero_s:]
-
                         sec_ret = sec_vals.pct_change().dropna()
                         sec_ret = sec_ret[sec_ret.abs() <= 0.25]
 
-                        bm_ret  = bm_close.pct_change().dropna()
-                        common  = sec_ret.index.intersection(bm_ret.index)
+                        bm_ret = bm_close.pct_change().dropna()
+                        common = sec_ret.index.intersection(bm_ret.index)
                         sr = sec_ret.loc[common]; br = bm_ret.loc[common]
 
                         trs = ((sec_vals.iloc[-1]/sec_vals.iloc[0])-1)*100
@@ -1788,8 +1650,7 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                                 cv_usd = cp_ * get_rate_s(info["currency"], sec_vals.index[-1]) * info["quantity"]
                                 wt     = iv_usd / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
                                 contrib = (cv_usd - iv_usd) / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
-                                hp.append({"Ticker":ticker,"Name":info["name"],
-                                           "Ccy": info["currency"],
+                                hp.append({"Ticker":ticker,"Name":info["name"],"Ccy":info["currency"],
                                            "Return (%)":ret_pct,"Weight (%)":wt,"Contribution (%)":contrib})
 
                         pdf = pd.DataFrame(hp).sort_values("Return (%)", ascending=False)
@@ -1824,7 +1685,6 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
             st.markdown(f"## **Financial Analysis** — {sector_name}")
 
             if st.button("Generate Financial Analysis", type="primary", key=f"fin_gen_{sector_name}"):
-
                 fin_rows  = []
                 failed_tx = []
                 status_ph = st.empty()
@@ -1861,10 +1721,8 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
 
                 if failed_tx:
                     names = ", ".join(t for t, _ in failed_tx)
-                    st.warning(
-                        f"Could not retrieve data for **{names}** (rate-limited). "
-                        "Their bars are omitted but the **industry benchmark still uses the full peer set**."
-                    )
+                    st.warning(f"Could not retrieve data for **{names}** (rate-limited). "
+                               "Their bars are omitted but the **industry benchmark still uses the full peer set**.")
 
                 if not fin_rows:
                     st.error("No financial data could be retrieved. Please wait a minute and try again.")
@@ -1878,10 +1736,8 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
 
                 st.markdown("### **Key Financial Ratios**")
                 ratio_cfg = [
-                    ("P/E Ratio",    "Price-to-Earnings"),
-                    ("P/B Ratio",    "Price-to-Book"),
-                    ("Debt/Equity",  "Debt-to-Equity"),
-                    ("OCF Ratio",    "Operating Cash Flow Ratio"),
+                    ("P/E Ratio", "Price-to-Earnings"), ("P/B Ratio", "Price-to-Book"),
+                    ("Debt/Equity", "Debt-to-Equity"),  ("OCF Ratio", "Operating Cash Flow Ratio"),
                 ]
                 c1, c2 = st.columns(2)
                 for idx, (col, title) in enumerate(ratio_cfg):
@@ -1892,26 +1748,18 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                     ind_avg  = ind_avgs.get(col)
                     port_avg = cd[col].mean()
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        x=cd["Name"], y=cd[col], name=title,
-                        marker_color="#030C30", text=cd[col].round(2), textposition="outside",
-                    ))
+                    fig.add_trace(go.Bar(x=cd["Name"], y=cd[col], name=title,
+                                         marker_color="#030C30", text=cd[col].round(2), textposition="outside"))
                     if ind_avg is not None:
-                        fig.add_trace(go.Scatter(
-                            x=cd["Name"], y=[ind_avg]*len(cd), mode="lines",
-                            name=f"Industry Median: {ind_avg:.2f}",
-                            line=dict(color="#FF4B4B", width=2, dash="dot"),
-                        ))
+                        fig.add_trace(go.Scatter(x=cd["Name"], y=[ind_avg]*len(cd), mode="lines",
+                                                 name=f"Industry Median: {ind_avg:.2f}",
+                                                 line=dict(color="#FF4B4B", width=2, dash="dot")))
                     if len(cd) > 1:
-                        fig.add_trace(go.Scatter(
-                            x=cd["Name"], y=[port_avg]*len(cd), mode="lines",
-                            name=f"Portfolio Avg: {port_avg:.2f}",
-                            line=dict(color="#FFA500", width=1.5, dash="dashdot"),
-                        ))
-                    fig.update_layout(
-                        title=title, height=400, showlegend=True,
-                        hovermode="x unified", template="plotly_white",
-                    )
+                        fig.add_trace(go.Scatter(x=cd["Name"], y=[port_avg]*len(cd), mode="lines",
+                                                 name=f"Portfolio Avg: {port_avg:.2f}",
+                                                 line=dict(color="#FFA500", width=1.5, dash="dashdot")))
+                    fig.update_layout(title=title, height=400, showlegend=True,
+                                      hovermode="x unified", template="plotly_white")
                     (c1 if idx % 2 == 0 else c2).plotly_chart(fig, use_container_width=True)
 
                 st.markdown("### **Comprehensive Financial Summary**")
@@ -1920,16 +1768,12 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                 st.markdown("### **Sector Statistics**")
                 nd = fin_df.select_dtypes(include=[np.number])
                 if not nd.empty:
-                    st.dataframe(
-                        nd.describe().T[["mean","50%","min","max","std"]]
-                          .rename(columns={"50%":"median"}),
-                        use_container_width=True,
-                    )
+                    st.dataframe(nd.describe().T[["mean","50%","min","max","std"]].rename(columns={"50%":"median"}),
+                                 use_container_width=True)
 
                 if ind_avgs:
                     st.markdown("### **Industry Benchmark Medians**")
-                    bm_df = pd.DataFrame([{"Ratio": k, "Industry Median": round(v, 2)}
-                                          for k, v in ind_avgs.items()])
+                    bm_df = pd.DataFrame([{"Ratio": k, "Industry Median": round(v, 2)} for k, v in ind_avgs.items()])
                     st.dataframe(bm_df, hide_index=True, use_container_width=True)
 
         # ── Company Specific ─────────────────────────────────────────────────
@@ -1944,7 +1788,7 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                 cinfo      = sector_holdings[sel_ticker]
                 ccy        = cinfo["currency"]
 
-                st.subheader(f"{sel_name} ({sel_ticker}) — Native currency: {ccy}")
+                st.markdown(f"### **{sel_name}** ({sel_ticker}) — Native currency: {ccy}")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Sector",        cinfo["sector"])
                 c2.metric("Currency",      ccy)
@@ -2052,14 +1896,12 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                                 fx_spot  = _spot_fx(ccy, "USD")
 
                                 c1, c2, c3, c4 = st.columns(4)
-                                c1.metric(f"Current Price ({ccy})",   f"{cur_p:.2f}",
-                                          delta=f"{tr_:.2f}% vs avg buy")
-                                c1.metric("Current Price (USD)",       f"${cur_p * fx_spot:.2f}")
-                                c2.metric(f"Position Value ({ccy})",   f"{cur_p*cinfo['quantity']:,.2f}")
-                                c2.metric("Position Value (USD)",       f"${cur_p*cinfo['quantity']*fx_spot:,.0f}")
-                                c3.metric(f"Total Gain/Loss ({ccy})",   f"{(cur_p-pp)*cinfo['quantity']:,.2f}",
-                                          delta=f"{tr_:.2f}%")
-                                c3.metric("Total Gain/Loss (USD)",       f"${(cur_p-pp)*cinfo['quantity']*fx_spot:,.0f}")
+                                c1.metric(f"Current Price ({ccy})",  f"{cur_p:.2f}", delta=f"{tr_:.2f}% vs avg buy")
+                                c1.metric("Current Price (USD)",      f"${cur_p * fx_spot:.2f}")
+                                c2.metric(f"Position Value ({ccy})",  f"{cur_p*cinfo['quantity']:,.2f}")
+                                c2.metric("Position Value (USD)",      f"${cur_p*cinfo['quantity']*fx_spot:,.0f}")
+                                c3.metric(f"Total Gain/Loss ({ccy})",  f"{(cur_p-pp)*cinfo['quantity']:,.2f}", delta=f"{tr_:.2f}%")
+                                c3.metric("Total Gain/Loss (USD)",      f"${(cur_p-pp)*cinfo['quantity']*fx_spot:,.0f}")
                                 if target_price and target_price > 0:
                                     c4.metric("Upside to Target", f"{((target_price-cur_p)/cur_p*100):.2f}%",
                                               delta=f"{target_price:.2f} {ccy} target")
@@ -2069,10 +1911,10 @@ elif main_page in ["📱 TMT Sector","🏦 FIG Sector","🏭 Industrials Sector"
                                 st.markdown("---")
                                 st.markdown("### **Price Targets**")
                                 c1, c2, c3, c4 = st.columns(4)
-                                c1.metric(f"Your Target Price ({ccy})",   f"{target_price:.2f}" if target_price else "Not Set")
-                                c2.metric(f"Analyst Consensus ({ccy})",   f"{an_target:.2f}" if an_target else "N/A")
-                                c3.metric("Number of Analysts",           an_count if an_target else "N/A")
-                                c4.metric("Recommendation",               an_rec)
+                                c1.metric(f"Your Target Price ({ccy})", f"{target_price:.2f}" if target_price else "Not Set")
+                                c2.metric(f"Analyst Consensus ({ccy})", f"{an_target:.2f}" if an_target else "N/A")
+                                c3.metric("Number of Analysts",         an_count if an_target else "N/A")
+                                c4.metric("Recommendation",             an_rec)
 
                                 st.markdown("---")
                                 st.markdown("### **Investment Thesis**")
