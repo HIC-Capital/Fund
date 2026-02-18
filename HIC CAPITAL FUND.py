@@ -579,6 +579,10 @@ st.markdown("""
         color: #0F1D64; font-size: 16px; font-weight: 500;
         transition: all 0.3s ease;
     }
+    div.stButton > button::first-line {
+        font-weight: 700;
+        font-size: 18px;
+    }
     div.stButton > button:hover {
         background-color: #0F1D64; color: white; border-color: #0F1D64;
         transform: translateY(-2px); box-shadow: 0 4px 12px rgba(15,29,100,0.3);
