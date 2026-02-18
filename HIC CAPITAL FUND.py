@@ -1613,139 +1613,244 @@ elif main_page in ["TMT Sector","FIG Sector","Industrials Sector",
         elif sector_tab == "Financial Analysis":
             st.header(f"💰 {sector_name} - Financial Analysis")
 
+            # ── Shared helpers (defined once, used for both portfolio & peers) ──
+            import time, statistics as _stats
+
+            SECTOR_ETFS = {
+                "TMT":"XLK","FIG":"XLF","Industrials":"XLI","PUI":"XLB",
+                "Consumer Goods":"XLP","Healthcare":"XLV",
+                "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
+            }
+            SECTOR_PROXIES = {
+                "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
+                "XLF": ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
+                "XLI": ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
+                "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
+                "XLP": ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
+                "XLV": ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
+                "XLRE":["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
+                "XLE": ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
+                "XLU": ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
+                "SPY": ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
+            }
+            ALL_RATIO_COLS = [
+                "P/E Ratio","P/B Ratio","Debt/Equity","OCF Ratio",
+                "Forward P/E","Profit Margin (%)","ROE (%)","ROA (%)","Beta","Current Ratio",
+            ]
+
+            def _yf_info_with_retry(ticker, max_attempts=4, base_delay=3.0):
+                """
+                Fetch yfinance .info for *ticker* with exponential-backoff retry.
+                Returns (info_dict, error_str_or_None).
+                """
+                for attempt in range(max_attempts):
+                    try:
+                        info = yf.Ticker(ticker).info
+                        # yfinance sometimes returns an empty / stub dict on rate-limit
+                        if info and len(info) > 5:
+                            return info, None
+                        # treat stub as a soft failure → retry
+                        raise ValueError("Empty info dict returned")
+                    except Exception as e:
+                        err = str(e)
+                        if attempt < max_attempts - 1:
+                            wait = base_delay * (2 ** attempt)   # 3 s, 6 s, 12 s …
+                            time.sleep(wait)
+                        else:
+                            return {}, err
+                return {}, "Max retries exceeded"
+
+            def _extract_ratios(ti, cf_df=None, bs_df=None):
+                """Pull the standard ratio set from a yfinance info dict."""
+                ocf_r = None
+                if cf_df is not None and bs_df is not None:
+                    try:
+                        if not cf_df.empty and not bs_df.empty:
+                            ocf = cf_df.loc["Operating Cash Flow"].iloc[0] if "Operating Cash Flow" in cf_df.index else None
+                            cl_ = bs_df.loc["Current Liabilities"].iloc[0]  if "Current Liabilities"  in bs_df.index else None
+                            ocf_r = ocf / cl_ if ocf is not None and cl_ and cl_ != 0 else None
+                    except Exception:
+                        pass
+                return {
+                    "Market Cap":         ti.get("marketCap"),
+                    "P/E Ratio":          ti.get("trailingPE"),
+                    "Forward P/E":        ti.get("forwardPE"),
+                    "P/B Ratio":          ti.get("priceToBook"),
+                    "Dividend Yield (%)": (ti.get("dividendYield")   or 0) * 100,
+                    "Profit Margin (%)":  (ti.get("profitMargins")   or 0) * 100,
+                    "ROE (%)":            (ti.get("returnOnEquity")  or 0) * 100,
+                    "ROA (%)":            (ti.get("returnOnAssets")  or 0) * 100,
+                    "Debt/Equity":        ti.get("debtToEquity"),
+                    "Current Ratio":      ti.get("currentRatio"),
+                    "Revenue Growth (%)": (ti.get("revenueGrowth")   or 0) * 100,
+                    "Beta":               ti.get("beta"),
+                    "OCF Ratio":          ocf_r,
+                }
+
+            @st.cache_data(show_spinner=False)
+            def fetch_sector_industry_avg(sector, ratio_cols_tuple):
+                """
+                Fetch peer ratios for the sector with retry + inter-ticker delay.
+                Cached so repeated clicks don't re-hit the API.
+                """
+                ratio_cols = list(ratio_cols_tuple)
+                etf_ticker = SECTOR_ETFS.get(sector, "SPY")
+                proxies    = SECTOR_PROXIES.get(etf_ticker, SECTOR_PROXIES["SPY"])
+                peer_vals  = {col: [] for col in ratio_cols}
+
+                for pt in proxies:
+                    info, err = _yf_info_with_retry(pt, max_attempts=3, base_delay=2.0)
+                    if err:
+                        continue   # silently skip failed peers — we have 10 per sector
+                    mapping = {
+                        "P/E Ratio":          info.get("trailingPE"),
+                        "P/B Ratio":          info.get("priceToBook"),
+                        "Debt/Equity":        info.get("debtToEquity"),
+                        "OCF Ratio":          None,
+                        "Forward P/E":        info.get("forwardPE"),
+                        "Profit Margin (%)":  (info.get("profitMargins")  or 0) * 100,
+                        "ROE (%)":            (info.get("returnOnEquity") or 0) * 100,
+                        "ROA (%)":            (info.get("returnOnAssets") or 0) * 100,
+                        "Dividend Yield (%)": (info.get("dividendYield")  or 0) * 100,
+                        "Revenue Growth (%)": (info.get("revenueGrowth")  or 0) * 100,
+                        "Beta":               info.get("beta"),
+                        "Current Ratio":      info.get("currentRatio"),
+                    }
+                    for col in ratio_cols:
+                        v = mapping.get(col)
+                        if v is None:
+                            continue
+                        try:
+                            fv = float(v)
+                            if col in ("P/E Ratio", "Forward P/E") and (fv < 0 or fv > 200): continue
+                            if col == "Debt/Equity" and fv > 500: continue
+                            peer_vals[col].append(fv)
+                        except Exception:
+                            pass
+                    time.sleep(0.5)   # gentle inter-ticker pause for peers
+
+                return {col: _stats.median(vals) for col, vals in peer_vals.items() if vals}
+
             if st.button("📊 Generate Financial Analysis", type="primary", key=f"fin_gen_{sector_name}"):
-                try:
-                    with st.spinner("Fetching financial data…"):
-                        fin_rows = []
-                        for ticker, info in sector_holdings.items():
-                            try:
-                                tk = yf.Ticker(ticker); ti = tk.info
-                                try:
-                                    cf = tk.cash_flow; bs = tk.balance_sheet
-                                    ocf_r = None
-                                    if not cf.empty and not bs.empty:
-                                        ocf = cf.loc["Operating Cash Flow"].iloc[0] if "Operating Cash Flow" in cf.index else None
-                                        cl_ = bs.loc["Current Liabilities"].iloc[0] if "Current Liabilities" in bs.index else None
-                                        ocf_r = ocf / cl_ if ocf is not None and cl_ and cl_ != 0 else None
-                                except Exception: ocf_r = None
 
-                                fin_rows.append({
-                                    "Ticker": ticker, "Name": info["name"],
-                                    "Currency": info["currency"],
-                                    "Market Cap":         ti.get("marketCap"),
-                                    "P/E Ratio":          ti.get("trailingPE"),
-                                    "Forward P/E":        ti.get("forwardPE"),
-                                    "P/B Ratio":          ti.get("priceToBook"),
-                                    "Dividend Yield (%)": (ti.get("dividendYield") or 0) * 100,
-                                    "Profit Margin (%)":  (ti.get("profitMargins") or 0) * 100,
-                                    "ROE (%)":            (ti.get("returnOnEquity") or 0) * 100,
-                                    "ROA (%)":            (ti.get("returnOnAssets") or 0) * 100,
-                                    "Debt/Equity":        ti.get("debtToEquity"),
-                                    "Current Ratio":      ti.get("currentRatio"),
-                                    "Revenue Growth (%)": (ti.get("revenueGrowth") or 0) * 100,
-                                    "Beta":               ti.get("beta"),
-                                    "OCF Ratio":          ocf_r,
-                                })
-                            except Exception as e:
-                                st.warning(f"Could not fetch data for {ticker}: {e}")
+                # ── 1. Fetch portfolio holdings data with retry ───────────────
+                fin_rows  = []
+                failed_tx = []
+                status_ph = st.empty()
 
-                    if fin_rows:
-                        fin_df = pd.DataFrame(fin_rows)
-                        st.subheader("📊 Key Financial Ratios")
+                tickers_list = list(sector_holdings.items())
+                for i, (ticker, info) in enumerate(tickers_list):
+                    status_ph.info(f"⏳ Fetching data for **{ticker}** ({i+1}/{len(tickers_list)})…")
+                    ti, err = _yf_info_with_retry(ticker, max_attempts=4, base_delay=3.0)
 
-                        SECTOR_ETFS = {
-                            "TMT":"XLK","FIG":"XLF","Industrials":"XLI","PUI":"XLB",
-                            "Consumer Goods":"XLP","Healthcare":"XLV",
-                            "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
-                        }
+                    if err:
+                        failed_tx.append((ticker, err))
+                        # Try one more time after a longer pause before giving up
+                        status_ph.warning(f"⚠️ Rate-limited on {ticker}, waiting 10 s before retry…")
+                        time.sleep(10)
+                        ti, err2 = _yf_info_with_retry(ticker, max_attempts=2, base_delay=5.0)
+                        if err2:
+                            failed_tx[-1] = (ticker, err2)   # update with latest error
+                            status_ph.warning(f"⚠️ Could not retrieve **{ticker}** — skipping. Will still appear in industry average.")
+                            time.sleep(1)
+                            continue
+                        else:
+                            failed_tx.pop()   # recovered
 
-                        @st.cache_data(show_spinner=False)
-                        def fetch_sector_industry_avg(sector, ratio_cols):
-                            etf_ticker = SECTOR_ETFS.get(sector, "SPY")
-                            SECTOR_PROXIES = {
-                                "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
-                                "XLF": ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
-                                "XLI": ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
-                                "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
-                                "XLP": ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
-                                "XLV": ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
-                                "XLRE":["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
-                                "XLE": ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
-                                "XLU": ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
-                                "SPY": ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
-                            }
-                            proxies = SECTOR_PROXIES.get(etf_ticker, SECTOR_PROXIES["SPY"])
-                            peer_vals = {col: [] for col in ratio_cols}
-                            for pt in proxies:
-                                try:
-                                    pi = yf.Ticker(pt).info
-                                    mapping = {
-                                        "P/E Ratio":          pi.get("trailingPE"),
-                                        "P/B Ratio":          pi.get("priceToBook"),
-                                        "Debt/Equity":        pi.get("debtToEquity"),
-                                        "OCF Ratio":          None,
-                                        "Forward P/E":        pi.get("forwardPE"),
-                                        "Profit Margin (%)":  (pi.get("profitMargins") or 0)*100,
-                                        "ROE (%)":            (pi.get("returnOnEquity") or 0)*100,
-                                        "ROA (%)":            (pi.get("returnOnAssets") or 0)*100,
-                                        "Dividend Yield (%)": (pi.get("dividendYield") or 0)*100,
-                                        "Revenue Growth (%)": (pi.get("revenueGrowth") or 0)*100,
-                                        "Beta":               pi.get("beta"),
-                                        "Current Ratio":      pi.get("currentRatio"),
-                                    }
-                                    for col in ratio_cols:
-                                        v = mapping.get(col)
-                                        if v is not None:
-                                            try:
-                                                fv = float(v)
-                                                if col in ["P/E Ratio","Forward P/E"] and (fv < 0 or fv > 200): continue
-                                                if col == "Debt/Equity" and fv > 500: continue
-                                                peer_vals[col].append(fv)
-                                            except Exception:
-                                                pass
-                                except Exception:
-                                    pass
-                            import statistics
-                            return {col: statistics.median(vals) for col, vals in peer_vals.items() if vals}
+                    # Fetch cashflow & balance sheet (secondary — failure is OK)
+                    cf_df = bs_df = None
+                    try:
+                        tk    = yf.Ticker(ticker)
+                        cf_df = tk.cash_flow
+                        bs_df = tk.balance_sheet
+                    except Exception:
+                        pass
 
-                        with st.spinner("Fetching sector industry benchmarks…"):
-                            ind_avgs = fetch_sector_industry_avg(sector_name,
-                                ["P/E Ratio","P/B Ratio","Debt/Equity","OCF Ratio",
-                                 "Forward P/E","Profit Margin (%)","ROE (%)","ROA (%)","Beta","Current Ratio"])
+                    row = {"Ticker": ticker, "Name": info["name"], "Currency": info["currency"]}
+                    row.update(_extract_ratios(ti, cf_df, bs_df))
+                    fin_rows.append(row)
+                    time.sleep(0.8)   # polite inter-ticker pause
 
-                        ratio_cfg = [("P/E Ratio","Price-to-Earnings"),("P/B Ratio","Price-to-Book"),
-                                     ("Debt/Equity","Debt-to-Equity"),("OCF Ratio","Operating Cash Flow Ratio")]
-                        c1, c2 = st.columns(2)
-                        for idx, (col, title) in enumerate(ratio_cfg):
-                            cd = fin_df[["Name", col]].dropna()
-                            if not cd.empty:
-                                ind_avg  = ind_avgs.get(col)
-                                port_avg = cd[col].mean()
-                                fig = go.Figure()
-                                fig.add_trace(go.Bar(x=cd["Name"], y=cd[col], name=title,
-                                                     marker_color="#030C30", text=cd[col].round(2), textposition="outside"))
-                                if ind_avg is not None:
-                                    fig.add_trace(go.Scatter(x=cd["Name"], y=[ind_avg]*len(cd), mode="lines",
-                                                             name=f"Industry Median: {ind_avg:.2f}",
-                                                             line=dict(color="#FF4B4B", width=2, dash="dot")))
-                                fig.add_trace(go.Scatter(x=cd["Name"], y=[port_avg]*len(cd), mode="lines",
-                                                         name=f"Our Portfolio Avg: {port_avg:.2f}",
-                                                         line=dict(color="#FFA500", width=1.5, dash="dashdot")))
-                                fig.update_layout(title=title, height=400, showlegend=True,
-                                                  hovermode="x unified", template="plotly_white")
-                                (c1 if idx % 2 == 0 else c2).plotly_chart(fig, use_container_width=True)
+                status_ph.empty()
 
-                        st.subheader("📋 Comprehensive Financial Summary")
-                        st.dataframe(fin_df.fillna("N/A"), hide_index=True, use_container_width=True)
-                        st.subheader("🔍 Sector Statistics")
-                        nd = fin_df.select_dtypes(include=[np.number])
-                        if not nd.empty:
-                            st.dataframe(nd.describe().T[["mean","50%","min","max","std"]].rename(columns={"50%":"median"}),
-                                         use_container_width=True)
-                    else:
-                        st.warning("No financial data could be retrieved.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                if failed_tx:
+                    names = ", ".join(t for t, _ in failed_tx)
+                    st.warning(
+                        f"⚠️ Could not retrieve data for **{names}** (rate-limited). "
+                        "Their data is excluded from the portfolio bars but the "
+                        "**industry benchmark line still uses the full peer set**."
+                    )
+
+                if not fin_rows:
+                    st.error("No financial data could be retrieved for any holding. Please wait a minute and try again.")
+                    st.stop()
+
+                fin_df = pd.DataFrame(fin_rows)
+                st.success(f"✅ Retrieved data for {len(fin_rows)}/{len(tickers_list)} holdings.")
+
+                # ── 2. Fetch industry average (cached, with retry built-in) ──
+                with st.spinner("Fetching sector industry benchmarks (this is cached after first run)…"):
+                    ind_avgs = fetch_sector_industry_avg(
+                        sector_name, tuple(ALL_RATIO_COLS)
+                    )
+
+                # ── 3. Charts ─────────────────────────────────────────────────
+                st.subheader("📊 Key Financial Ratios")
+                ratio_cfg = [
+                    ("P/E Ratio",    "Price-to-Earnings"),
+                    ("P/B Ratio",    "Price-to-Book"),
+                    ("Debt/Equity",  "Debt-to-Equity"),
+                    ("OCF Ratio",    "Operating Cash Flow Ratio"),
+                ]
+                c1, c2 = st.columns(2)
+                for idx, (col, title) in enumerate(ratio_cfg):
+                    cd = fin_df[["Name", col]].dropna()
+                    if cd.empty:
+                        (c1 if idx % 2 == 0 else c2).caption(f"*{title}: no data available*")
+                        continue
+                    ind_avg  = ind_avgs.get(col)
+                    port_avg = cd[col].mean()
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=cd["Name"], y=cd[col], name=title,
+                        marker_color="#030C30", text=cd[col].round(2), textposition="outside",
+                    ))
+                    if ind_avg is not None:
+                        fig.add_trace(go.Scatter(
+                            x=cd["Name"], y=[ind_avg]*len(cd), mode="lines",
+                            name=f"Industry Median: {ind_avg:.2f}",
+                            line=dict(color="#FF4B4B", width=2, dash="dot"),
+                        ))
+                    if len(cd) > 1:
+                        fig.add_trace(go.Scatter(
+                            x=cd["Name"], y=[port_avg]*len(cd), mode="lines",
+                            name=f"Portfolio Avg: {port_avg:.2f}",
+                            line=dict(color="#FFA500", width=1.5, dash="dashdot"),
+                        ))
+                    fig.update_layout(
+                        title=title, height=400, showlegend=True,
+                        hovermode="x unified", template="plotly_white",
+                    )
+                    (c1 if idx % 2 == 0 else c2).plotly_chart(fig, use_container_width=True)
+
+                # ── 4. Full table & stats ─────────────────────────────────────
+                st.subheader("📋 Comprehensive Financial Summary")
+                st.dataframe(fin_df.fillna("N/A"), hide_index=True, use_container_width=True)
+
+                st.subheader("🔍 Sector Statistics")
+                nd = fin_df.select_dtypes(include=[np.number])
+                if not nd.empty:
+                    st.dataframe(
+                        nd.describe().T[["mean","50%","min","max","std"]]
+                          .rename(columns={"50%":"median"}),
+                        use_container_width=True,
+                    )
+
+                if ind_avgs:
+                    st.subheader("📐 Industry Benchmark Medians")
+                    bm_df = pd.DataFrame([{"Ratio": k, "Industry Median": round(v, 2)}
+                                          for k, v in ind_avgs.items()])
+                    st.dataframe(bm_df, hide_index=True, use_container_width=True)
 
         # ── Company Specific ─────────────────────────────────────────────────
         elif sector_tab == "Company Specific":
