@@ -98,22 +98,79 @@ def load_data():
                 return info_col_map[candidate]
         return None
 
-    def fetch_currency_from_yf(ticker):
+    # ── Currency resolution — priority order ─────────────────────────────────
+    # 1. Excel "Currency" / "CCY" column  (most reliable — never flakes)
+    # 2. yfinance .info["currency"]        (fallback only when Excel column absent)
+    # 3. Hard-coded suffix map             (fallback when yfinance also fails)
+    # This order ensures a cold-boot rate-limit never poisons the cache with "USD".
+
+    SUFFIX_CCY = {
+        ".NS": "INR", ".BO": "INR",
+        ".L":  "GBP", ".IL": "GBP",
+        ".DE": "EUR", ".F":  "EUR", ".XETRA": "EUR",
+        ".PA": "EUR", ".AM": "EUR", ".AS": "EUR",
+        ".MI": "EUR", ".MC": "EUR",
+        ".SW": "CHF",
+        ".HK": "HKD",
+        ".AX": "AUD",
+        ".TO": "CAD", ".V":  "CAD",
+        ".T":  "JPY",
+        ".KS": "KRW", ".KQ": "KRW",
+        ".SS": "CNY", ".SZ": "CNY",
+        ".ST": "SEK", ".CO": "DKK", ".OL": "NOK",
+        ".HE": "EUR", ".BR": "EUR", ".LS": "EUR",
+        ".LI": "CHF",
+    }
+
+    ccy_col = resolve_col("currency")   # column name in Excel, or None
+
+    def _ccy_from_excel(ticker):
+        """Read currency for *ticker* from the Excel sheet (first non-blank value)."""
+        if ccy_col is None:
+            return None
+        rows = raw[raw[ticker_col].astype(str).str.strip() == ticker][ccy_col]
+        rows = rows.dropna()
+        rows = rows[rows.astype(str).str.strip() != ""]
+        if len(rows) == 0:
+            return None
+        val = str(rows.iloc[0]).strip().upper()
+        return val if len(val) == 3 else None
+
+    def _ccy_from_suffix(ticker):
+        """Infer currency from the ticker's exchange suffix (e.g. .NS → INR)."""
+        t = ticker.upper()
+        for suffix, ccy in SUFFIX_CCY.items():
+            if t.endswith(suffix.upper()):
+                return ccy
+        return None
+
+    def _ccy_from_yf(ticker):
+        """Query yfinance for the trading currency — used only as last resort."""
         try:
             info = yf.Ticker(ticker).info
-            ccy = info.get("currency", None)
+            ccy  = info.get("currency", None)
             if ccy and isinstance(ccy, str) and len(ccy) == 3:
                 return ccy.upper()
         except Exception:
             pass
         return None
 
-    print("Fetching currencies from yfinance…")
+    print("Resolving currencies (Excel → suffix map → yfinance)…")
     yf_currencies = {}
     for ticker in unique_tickers:
-        ccy = fetch_currency_from_yf(ticker)
-        yf_currencies[ticker] = ccy if ccy else "USD"
-        print(f"  {ticker}: {yf_currencies[ticker]}")
+        ccy = _ccy_from_excel(ticker)
+        src = "excel"
+        if not ccy:
+            ccy = _ccy_from_suffix(ticker)
+            src = "suffix"
+        if not ccy:
+            ccy = _ccy_from_yf(ticker)
+            src = "yfinance"
+        if not ccy:
+            ccy = "USD"
+            src = "default"
+        yf_currencies[ticker] = ccy
+        print(f"  {ticker}: {ccy}  [{src}]")
 
     INFO_DEFAULTS["currency"] = lambda t: yf_currencies.get(t, "USD")
 
@@ -127,7 +184,8 @@ def load_data():
         for field, default_fn in INFO_DEFAULTS.items():
             col = resolve_col(field)
             if field == "currency":
-                rec[field] = yf_currencies.get(ticker, "USD")
+                # Always use the resolved value — never re-read from a column here
+                rec[field] = yf_currencies[ticker]
                 continue
             if col is not None:
                 vals = ticker_rows[col].dropna()
