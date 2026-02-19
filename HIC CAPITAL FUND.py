@@ -371,30 +371,52 @@ def _spot_fx(currency: str, target: str = "USD") -> float:
 
 
 # =============================================================================
-# FINANCIAL ANALYSIS HELPERS
+# FINANCIAL ANALYSIS HELPERS — MSCI World sector benchmarks
 # =============================================================================
 import statistics as _stats
 
+# ---------------------------------------------------------------------------
+# Primary: iShares MSCI World sector UCITS ETFs (traded on Euronext Amsterdam,
+# USD-denominated, freely available via yfinance with the .AS suffix).
+# Fallback: URTH (iShares MSCI World ETF, NYSE) for any unmapped sector.
+#
+# Sector labels deliberately kept identical to the original so that no
+# downstream call-site needs to change.
+# ---------------------------------------------------------------------------
 _SECTOR_ETFS = {
-    "TMT": "XLK", "FIG": "XLF", "Industrials": "XLI", "PUI": "XLB",
-    "Consumer Goods": "XLP", "Healthcare": "XLV",
-    "Real Estate": "XLRE", "Energy": "XLE", "Utilities": "XLU",
+    "TMT":            "WITS.AS",   # MSCI World Information Technology
+    "FIG":            "WFNS.AS",   # MSCI World Financials
+    "Industrials":    "WINS.AS",   # MSCI World Industrials
+    "PUI":            "WMTS.AS",   # MSCI World Materials  (closest to PUI/upstream industries)
+    "Consumer Goods": "WCOD.AS",   # MSCI World Consumer Staples / Defensive
+    "Healthcare":     "WHCS.AS",   # MSCI World Health Care
+    "Real Estate":    "WREI.AS",   # MSCI World Real Estate
+    "Energy":         "WENS.L",    # MSCI World Energy  (London listing; most liquid)
+    "Utilities":      "WUTY.AS",   # MSCI World Utilities
 }
+
+# ---------------------------------------------------------------------------
+# Representative global peers for each MSCI World sector ETF.
+# These are large-cap, globally recognised names that appear as top holdings
+# in the corresponding iShares MSCI World sector funds — deliberately chosen
+# from multiple geographies to reflect the global nature of the benchmark.
+# ---------------------------------------------------------------------------
 _SECTOR_PROXIES = {
-    "XLK": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ACN","AMD","ADBE","CSCO"],
-    "XLF": ["BRK-B","JPM","V","MA","BAC","GS","MS","WFC","AXP","BLK"],
-    "XLI": ["GE","CAT","RTX","HON","UNP","BA","LMT","DE","MMM","EMR"],
-    "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","VMC","MLM","ALB","CE"],
-    "XLP": ["PG","COST","WMT","KO","PEP","MDLZ","PM","MO","CL","GIS"],
-    "XLV": ["LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","PFE","AMGN"],
-    "XLRE":["AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB"],
-    "XLE": ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","PSX","OXY"],
-    "XLU": ["NEE","DUK","SO","D","AEP","EXC","XEL","ED","ETR","WEC"],
-    "SPY": ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","BRK-B","JPM","V","UNH"],
+    "WITS.AS": ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "SAP", "2330.TW", "ASML", "CRM", "ACN"],
+    "WFNS.AS": ["JPM", "BAC", "GS", "MS", "BRK-B", "HSBA.L", "AXP", "BLK", "8306.T", "RY"],
+    "WINS.AS": ["GE", "CAT", "HON", "RTX", "UNP", "SIE.DE", "7011.T", "ABB", "ROK", "ETN"],
+    "WMTS.AS": ["LIN", "APD", "ECL", "SHW", "BHP", "RIO", "GLEN.L", "NEM", "FCX", "ALB"],
+    "WCOD.AS": ["PG", "COST", "WMT", "KO", "PEP", "NESN.SW", "ULVR.L", "2914.T", "OR.PA", "PM"],
+    "WHCS.AS": ["LLY", "UNH", "JNJ", "MRK", "ABBV", "NVO", "NOVN.SW", "AZN", "TMO", "DHR"],
+    "WREI.AS": ["AMT", "PLD", "EQIX", "PSA", "8951.T", "GMG.AX", "CCI", "DLR", "O", "SPG"],
+    "WENS.L":  ["XOM", "CVX", "SHEL", "BP", "TTE", "COP", "SLB", "ENB", "EOG", "EQNR"],
+    "WUTY.AS": ["NEE", "DUK", "SO", "ENEL.MI", "IBE.MC", "SSE.L", "EXC", "AEP", "RWE.DE", "XEL"],
+    "URTH":    ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ASML", "JPM", "LLY"],
 }
+
 _ALL_RATIO_COLS = (
-    "P/E Ratio","P/B Ratio","Debt/Equity","OCF Ratio",
-    "Forward P/E","Profit Margin (%)","ROE (%)","ROA (%)","Beta","Current Ratio",
+    "P/E Ratio", "P/B Ratio", "Debt/Equity", "OCF Ratio",
+    "Forward P/E", "Profit Margin (%)", "ROE (%)", "ROA (%)", "Beta", "Current Ratio",
 )
 
 
@@ -406,7 +428,10 @@ def _yf_info_with_retry(ticker: str, max_attempts: int = 4, base_delay: float = 
             info = yf.Ticker(ticker).info
             if info and any(info.get(f) is not None for f in CORE_FIELDS):
                 return info, None
-            raise ValueError(f"Rate-limit stub returned — none of {CORE_FIELDS} populated ({len(info)} keys total)")
+            raise ValueError(
+                f"Rate-limit stub returned — none of {CORE_FIELDS} populated "
+                f"({len(info)} keys total)"
+            )
         except Exception as e:
             err = str(e)
             if attempt < max_attempts - 1:
@@ -423,9 +448,12 @@ def _extract_ratios(ti: dict, cf_df=None, bs_df=None) -> dict:
     if cf_df is not None and bs_df is not None:
         try:
             if not cf_df.empty and not bs_df.empty:
-                ocf = cf_df.loc["Operating Cash Flow"].iloc[0] if "Operating Cash Flow" in cf_df.index else None
-                cl_ = bs_df.loc["Current Liabilities"].iloc[0]  if "Current Liabilities"  in bs_df.index else None
-                ocf_r = float(ocf) / float(cl_) if ocf is not None and cl_ and float(cl_) != 0 else None
+                ocf = (cf_df.loc["Operating Cash Flow"].iloc[0]
+                       if "Operating Cash Flow" in cf_df.index else None)
+                cl_ = (bs_df.loc["Current Liabilities"].iloc[0]
+                       if "Current Liabilities" in bs_df.index else None)
+                ocf_r = (float(ocf) / float(cl_)
+                         if ocf is not None and cl_ and float(cl_) != 0 else None)
         except Exception:
             pass
     return {
@@ -433,13 +461,13 @@ def _extract_ratios(ti: dict, cf_df=None, bs_df=None) -> dict:
         "P/E Ratio":          ti.get("trailingPE"),
         "Forward P/E":        ti.get("forwardPE"),
         "P/B Ratio":          ti.get("priceToBook"),
-        "Dividend Yield (%)": (ti.get("dividendYield")   or 0) * 100,
-        "Profit Margin (%)":  (ti.get("profitMargins")   or 0) * 100,
-        "ROE (%)":            (ti.get("returnOnEquity")  or 0) * 100,
-        "ROA (%)":            (ti.get("returnOnAssets")  or 0) * 100,
+        "Dividend Yield (%)": (ti.get("dividendYield")  or 0) * 100,
+        "Profit Margin (%)":  (ti.get("profitMargins")  or 0) * 100,
+        "ROE (%)":            (ti.get("returnOnEquity") or 0) * 100,
+        "ROA (%)":            (ti.get("returnOnAssets") or 0) * 100,
         "Debt/Equity":        ti.get("debtToEquity"),
         "Current Ratio":      ti.get("currentRatio"),
-        "Revenue Growth (%)": (ti.get("revenueGrowth")   or 0) * 100,
+        "Revenue Growth (%)": (ti.get("revenueGrowth")  or 0) * 100,
         "Beta":               ti.get("beta"),
         "OCF Ratio":          ocf_r,
     }
@@ -447,10 +475,11 @@ def _extract_ratios(ti: dict, cf_df=None, bs_df=None) -> dict:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_sector_industry_avg(sector: str) -> dict:
-    ratio_cols = list(_ALL_RATIO_COLS)
-    etf_ticker = _SECTOR_ETFS.get(sector, "SPY")
-    proxies    = _SECTOR_PROXIES.get(etf_ticker, _SECTOR_PROXIES["SPY"])
-    peer_vals  = {col: [] for col in ratio_cols}
+    ratio_cols  = list(_ALL_RATIO_COLS)
+    # Resolve sector → MSCI World ETF ticker; fall back to broad URTH
+    etf_ticker  = _SECTOR_ETFS.get(sector, "URTH")
+    proxies     = _SECTOR_PROXIES.get(etf_ticker, _SECTOR_PROXIES["URTH"])
+    peer_vals   = {col: [] for col in ratio_cols}
 
     for pt in proxies:
         info, err = _yf_info_with_retry(pt, max_attempts=3, base_delay=2.0)
@@ -461,13 +490,11 @@ def fetch_sector_industry_avg(sector: str) -> dict:
             "P/E Ratio":          info.get("trailingPE"),
             "P/B Ratio":          info.get("priceToBook"),
             "Debt/Equity":        info.get("debtToEquity"),
-            "OCF Ratio":          None,
+            "OCF Ratio":          None,          # requires cash-flow statement; skipped for peers
             "Forward P/E":        info.get("forwardPE"),
             "Profit Margin (%)":  (info.get("profitMargins")  or 0) * 100,
             "ROE (%)":            (info.get("returnOnEquity") or 0) * 100,
             "ROA (%)":            (info.get("returnOnAssets") or 0) * 100,
-            "Dividend Yield (%)": (info.get("dividendYield")  or 0) * 100,
-            "Revenue Growth (%)": (info.get("revenueGrowth")  or 0) * 100,
             "Beta":               info.get("beta"),
             "Current Ratio":      info.get("currentRatio"),
         }
@@ -477,15 +504,17 @@ def fetch_sector_industry_avg(sector: str) -> dict:
                 continue
             try:
                 fv = float(v)
-                if col in ("P/E Ratio", "Forward P/E") and (fv < 0 or fv > 200): continue
-                if col == "Debt/Equity" and fv > 500: continue
+                # Sanity filters — same as original
+                if col in ("P/E Ratio", "Forward P/E") and (fv < 0 or fv > 200):
+                    continue
+                if col == "Debt/Equity" and fv > 500:
+                    continue
                 peer_vals[col].append(fv)
             except Exception:
                 pass
         time.sleep(0.5)
 
     return {col: _stats.median(vals) for col, vals in peer_vals.items() if vals}
-
 
 # =============================================================================
 # PAGE CONFIG & CUSTOM CSS
@@ -1292,7 +1321,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
     # =========================================================================
     # HOME - Forecast
     # =========================================================================
-    elif home_tab == "Forecast":
+    elif home_tab == "Forecast (still under dev.)":
         st.markdown("## **Forecast**")
 
         with st.spinner("Loading stock data…"):
