@@ -713,7 +713,7 @@ elif main_page == "Home":
                      key="portfolio_struct", use_container_width=True):
             st.session_state.home_tab = "Portfolio Structure Analysis"
     with col3:
-        if st.button("Forecast\n\nMonte Carlo, analyst targets, DCF analysis",
+        if st.button("Forecast (still under dev.) \n\nMonte Carlo, analyst targets, DCF analysis",
                      key="forecast", use_container_width=True):
             st.session_state.home_tab = "Forecast"
 
