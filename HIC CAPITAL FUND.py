@@ -1552,11 +1552,19 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
         if sector_tab == "Performance Analysis":
             st.markdown(f"## **Performance Analysis** — {sector_name}")
 
+            # MSCI World sector ETFs — globally diversified benchmarks
             benchmarks = {
-                "TMT": "XLK", "FIG": "XLF", "Industrials": "XLI",
-                "PUI": "XLB", "Consumer Goods": "XLP", "Healthcare": "XLV",
+                "TMT":            "WITS.AS",   # MSCI World Information Technology
+                "FIG":            "WFNS.AS",   # MSCI World Financials
+                "Industrials":    "WINS.AS",   # MSCI World Industrials
+                "PUI":            "WMTS.AS",   # MSCI World Materials
+                "Consumer Goods": "WCOD.AS",   # MSCI World Consumer Staples
+                "Healthcare":     "WHCS.AS",   # MSCI World Health Care
+                "Real Estate":    "WREI.AS",   # MSCI World Real Estate
+                "Energy":         "WENS.L",    # MSCI World Energy
+                "Utilities":      "WUTY.AS",   # MSCI World Utilities
             }
-            bm_ticker = benchmarks.get(sector_name, "URTH")
+            bm_ticker = benchmarks.get(sector_name, "URTH")  # URTH = broad MSCI World fallback
 
             c1, c2 = st.columns(2)
             with c1: start_date = st.date_input("Start Date", pd.to_datetime("2025-11-06"), key=f"s_{sector_name}")
@@ -1570,10 +1578,24 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                         from scipy import stats as scipy_stats
                         with st.spinner(f"Fetching {sector_name} data…"):
                             bm_data  = yf.download(bm_ticker, start=start_date, end=end_date, progress=False)
-                            bm_close = bm_data["Close"].iloc[:,0] if isinstance(bm_data["Close"],pd.DataFrame) else bm_data["Close"]
+                            if bm_data.empty:
+                                st.error(
+                                    f"No data returned for benchmark **{bm_ticker}**. "
+                                    "The MSCI World sector ETFs (.AS / .L) may not be available "
+                                    "in your yfinance version — try updating: `pip install -U yfinance`."
+                                )
+                                st.stop()
+                            bm_close = (
+                                bm_data["Close"].iloc[:, 0]
+                                if isinstance(bm_data["Close"], pd.DataFrame)
+                                else bm_data["Close"]
+                            )
 
                             used_ccy_s = {info["currency"] for info in sector_holdings.values()}
-                            fx_usd_s   = {ccy: _fetch_fx_series(ccy, start_date, end_date, "USD") for ccy in used_ccy_s}
+                            fx_usd_s   = {
+                                ccy: _fetch_fx_series(ccy, start_date, end_date, "USD")
+                                for ccy in used_ccy_s
+                            }
 
                             sector_data  = {}
                             init_prices  = {}
@@ -1582,67 +1604,94 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                                 d = yf.download(ticker, start=start_date, end=end_date, progress=False)
                                 if not d.empty:
                                     sector_data[ticker] = d
-                                    cl = d["Close"].iloc[:,0] if isinstance(d["Close"],pd.DataFrame) else d["Close"]
+                                    cl = (
+                                        d["Close"].iloc[:, 0]
+                                        if isinstance(d["Close"], pd.DataFrame)
+                                        else d["Close"]
+                                    )
                                     init_prices[ticker]  = float(cl.iloc[0])
                                     cur_prices_s[ticker] = float(cl.iloc[-1])
 
                         def get_price_s(ticker, date):
                             if ticker not in sector_data: return None
                             d  = sector_data[ticker]
-                            cl = d["Close"].iloc[:,0] if isinstance(d["Close"],pd.DataFrame) else d["Close"]
+                            cl = d["Close"].iloc[:, 0] if isinstance(d["Close"], pd.DataFrame) else d["Close"]
                             av = cl.index[cl.index <= date]
                             return float(cl.loc[av[-1]]) if len(av) > 0 else None
 
                         def get_rate_s(currency, date):
                             return _fx_rate_on_date(currency, date, fx_usd_s.get(currency), "USD")
 
+                        # --- Vectorized portfolio value calculation ---
                         all_dates = bm_close.index
                         sector_first_trade = pd.Timestamp(
                             _tx[_tx["Ticker"].isin(sector_holdings.keys())]["Date"].min()
                         ).normalize()
                         active_sec_dates = all_dates[all_dates >= sector_first_trade]
-                        sec_vals = pd.Series(index=active_sec_dates, dtype=float)
-                        for date in active_sec_dates:
-                            dv = 0.0
-                            for ticker, info in sector_holdings.items():
+
+                        tickers_s = list(sector_holdings.keys())
+                        price_matrix_s = pd.DataFrame(index=active_sec_dates, columns=tickers_s, dtype=float)
+                        for ticker in tickers_s:
+                            info = sector_holdings[ticker]
+                            for date in active_sec_dates:
                                 p = get_price_s(ticker, date)
                                 if p is None: continue
-                                dv += p * info["quantity"] * get_rate_s(info["currency"], date)
-                            sec_vals[date] = dv
+                                price_matrix_s.loc[date, ticker] = p * get_rate_s(info["currency"], date)
 
-                        first_nonzero_s = sec_vals[sec_vals > 0].index.min()
-                        sec_vals        = sec_vals.loc[first_nonzero_s:]
+                        quantity_vec_s = pd.Series(
+                            {ticker: sector_holdings[ticker]["quantity"] for ticker in tickers_s}
+                        )
+                        sec_vals = price_matrix_s.mul(quantity_vec_s, axis=1).sum(axis=1)
+                        sec_vals = sec_vals.replace(0, float("nan")).dropna()
+
+                        if sec_vals.empty:
+                            st.warning("Could not compute sector portfolio values — check price/FX data.")
+                            st.stop()
+
                         sec_ret = sec_vals.pct_change().dropna()
                         sec_ret = sec_ret[sec_ret.abs() <= 0.25]
 
                         bm_ret = bm_close.pct_change().dropna()
                         common = sec_ret.index.intersection(bm_ret.index)
-                        sr = sec_ret.loc[common]; br = bm_ret.loc[common]
+                        sr = sec_ret.loc[common]
+                        br = bm_ret.loc[common]
 
-                        trs = ((sec_vals.iloc[-1]/sec_vals.iloc[0])-1)*100
-                        trb = ((bm_close.iloc[-1]/bm_close.iloc[0])-1)*100
+                        trs = ((sec_vals.iloc[-1] / sec_vals.iloc[0]) - 1) * 100
+                        trb = ((bm_close.iloc[-1]  / bm_close.iloc[0])  - 1) * 100
 
-                        rf    = 0.02/252
-                        exc   = sr - rf
-                        sharpe = (exc.mean()/exc.std(ddof=1))*np.sqrt(252) if exc.std(ddof=1) != 0 else 0
+                        # --- Geometric daily risk-free rate (exact compound) ---
+                        rf_daily = (1 + 0.02) ** (1 / 252) - 1
 
-                        rd = pd.DataFrame({"bm":br,"sec":sr}).dropna()
+                        # --- Sharpe (unchanged — already correct) ---
+                        exc    = sr - rf_daily
+                        sharpe = (
+                            (exc.mean() / exc.std(ddof=1)) * np.sqrt(252)
+                            if exc.std(ddof=1) != 0 else 0
+                        )
+
+                        # --- CAPM-correct Alpha & Beta: regress excess returns ---
+                        bm_excess = br - rf_daily
+                        rd = pd.DataFrame({"bm_excess": bm_excess, "sec_excess": exc}).dropna()
                         if len(rd) > 2:
-                            sl, ic, r_val_s, *_ = scipy_stats.linregress(rd["bm"], rd["sec"])
-                            beta = sl; alpha_a = ic * 252
+                            sl, ic, r_val_s, *_ = scipy_stats.linregress(
+                                rd["bm_excess"], rd["sec_excess"]
+                            )
+                            beta    = sl
+                            alpha_a = ic * 252   # Jensen's daily alpha → annualised
                         else:
                             beta = alpha_a = 0.0
 
-                        vol_s = sr.std(ddof=1)*np.sqrt(252)*100
-                        vol_b = br.std(ddof=1)*np.sqrt(252)*100
-                        cum   = (1+sr).cumprod()
-                        mdd   = ((cum - cum.expanding().max())/cum.expanding().max()).min()*100
-                        act   = sr - br; te = act.std(ddof=1)*np.sqrt(252)
-                        ir    = (act.mean()*252)/te if te != 0 else 0
+                        vol_s = sr.std(ddof=1) * np.sqrt(252) * 100
+                        vol_b = br.std(ddof=1) * np.sqrt(252) * 100
+                        cum   = (1 + sr).cumprod()
+                        mdd   = ((cum - cum.expanding().max()) / cum.expanding().max()).min() * 100
+                        act   = sr - br
+                        te    = act.std(ddof=1) * np.sqrt(252)
+                        ir    = (act.mean() * 252) / te if te != 0 else 0
 
                         st.markdown("### **Key Performance Metrics** (USD-based)")
                         c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Total Return (Sector)",    f"{trs:.2f}%", delta=f"{trs-trb:.2f}% vs benchmark")
+                        c1.metric("Total Return (Sector)",    f"{trs:.2f}%", delta=f"{trs - trb:.2f}% vs benchmark")
                         c1.metric("Sharpe Ratio",             f"{sharpe:.2f}")
                         c2.metric("Total Return (Benchmark)", f"{trb:.2f}%")
                         c2.metric("Beta",                     f"{beta:.2f}")
@@ -1651,41 +1700,57 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                         c4.metric("Volatility (Benchmark)",   f"{vol_b:.2f}%")
                         c4.metric("Information Ratio",        f"{ir:.2f}")
                         c1, c2 = st.columns(2)
-                        c1.metric("Alpha (Annualized)", f"{alpha_a*100:.2f}%")
-                        c2.metric("Tracking Error",     f"{te*100:.2f}%")
+                        c1.metric("Alpha (Annualized)",  f"{alpha_a * 100:.2f}%")
+                        c2.metric("Tracking Error",      f"{te * 100:.2f}%")
 
-                        st.markdown(f"### **{sector_name} vs {bm_ticker} Performance** (USD)")
-                        sn = (sec_vals/sec_vals.iloc[0])*100
-                        bn = (bm_close/bm_close.iloc[0])*100
+                        st.markdown(
+                            f"### **{sector_name} vs {bm_ticker} Performance** (USD)\n"
+                            f"*Benchmark: iShares MSCI World {sector_name} sector ETF*"
+                        )
+                        sn = (sec_vals / sec_vals.iloc[0]) * 100
+                        bn = (bm_close / bm_close.iloc[0]) * 100
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(x=sn.index, y=sn, name=f"{sector_name} Portfolio (USD)", mode="lines"))
-                        fig.add_trace(go.Scatter(x=bn.index, y=bn, name=f"{bm_ticker} Benchmark",         mode="lines"))
+                        fig.add_trace(go.Scatter(x=bn.index, y=bn, name=f"{bm_ticker} (MSCI World {sector_name})", mode="lines"))
                         fig.update_xaxes(rangeselector=dict(buttons=[
-                            dict(count=1,label="1M",step="month",stepmode="backward"),
-                            dict(count=6,label="6M",step="month",stepmode="backward"),
-                            dict(count=1,label="1Y",step="year",stepmode="backward"),
-                            dict(step="all",label="All"),
+                            dict(count=1,  label="1M",  step="month", stepmode="backward"),
+                            dict(count=6,  label="6M",  step="month", stepmode="backward"),
+                            dict(count=1,  label="1Y",  step="year",  stepmode="backward"),
+                            dict(step="all", label="All"),
                         ]))
-                        fig.update_layout(yaxis_title="Normalised Value (Base=100)", xaxis_title="Date")
+                        fig.update_layout(
+                            yaxis_title="Normalised Value (Base = 100)",
+                            xaxis_title="Date",
+                        )
                         st.plotly_chart(fig, use_container_width=True)
 
                         st.markdown("### **Holdings Performance Breakdown** (USD)")
                         hp = []
                         for ticker, info in sector_holdings.items():
                             if ticker in sector_data:
-                                ip = init_prices[ticker]; cp_ = cur_prices_s[ticker]
-                                ret_pct = ((cp_/ip)-1)*100
-                                iv_usd = ip * get_rate_s(info["currency"], sec_vals.index[0])  * info["quantity"]
-                                cv_usd = cp_ * get_rate_s(info["currency"], sec_vals.index[-1]) * info["quantity"]
-                                wt     = iv_usd / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
+                                ip    = init_prices[ticker]
+                                cp_   = cur_prices_s[ticker]
+                                ret_pct = ((cp_ / ip) - 1) * 100
+                                iv_usd  = ip  * get_rate_s(info["currency"], sec_vals.index[0])  * info["quantity"]
+                                cv_usd  = cp_ * get_rate_s(info["currency"], sec_vals.index[-1]) * info["quantity"]
+                                wt      = iv_usd / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
                                 contrib = (cv_usd - iv_usd) / sec_vals.iloc[0] * 100 if sec_vals.iloc[0] > 0 else 0
-                                hp.append({"Ticker":ticker,"Name":info["name"],"Ccy":info["currency"],
-                                           "Return (%)":ret_pct,"Weight (%)":wt,"Contribution (%)":contrib})
+                                hp.append({
+                                    "Ticker":          ticker,
+                                    "Name":            info["name"],
+                                    "Ccy":             info["currency"],
+                                    "Return (%)":      ret_pct,
+                                    "Weight (%)":      wt,
+                                    "Contribution (%)": contrib,
+                                })
 
                         pdf = pd.DataFrame(hp).sort_values("Return (%)", ascending=False)
-                        st.dataframe(pdf.style.format({"Return (%)":"{:.2f}%","Weight (%)":"{:.2f}%","Contribution (%)":"{:.2f}%"})
-                                     .background_gradient(subset=["Return (%)"], cmap="RdYlGn"),
-                                     hide_index=True, use_container_width=True)
+                        st.dataframe(
+                            pdf.style
+                               .format({"Return (%)": "{:.2f}%", "Weight (%)": "{:.2f}%", "Contribution (%)": "{:.2f}%"})
+                               .background_gradient(subset=["Return (%)"], cmap="RdYlGn"),
+                            hide_index=True, use_container_width=True,
+                        )
 
                         st.markdown("### **Risk Metrics**")
                         var95 = np.percentile(sr, 5) * 100
@@ -1694,7 +1759,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                             for ticker, info in sector_holdings.items():
                                 if ticker in sector_data:
                                     d  = sector_data[ticker]
-                                    cl = d["Close"].iloc[:,0] if isinstance(d["Close"],pd.DataFrame) else d["Close"]
+                                    cl = d["Close"].iloc[:, 0] if isinstance(d["Close"], pd.DataFrame) else d["Close"]
                                     rdict[info["name"]] = cl.pct_change().dropna()
                             corr_m = pd.DataFrame(rdict).corr()
                             c1, c2 = st.columns(2)
@@ -1702,13 +1767,16 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                             up_tri = corr_m.values[np.triu_indices_from(corr_m.values, k=1)]
                             c2.metric("Average Correlation",  f"{up_tri.mean():.2f}")
                             st.markdown("**Correlation Matrix**")
-                            st.dataframe(corr_m.style.background_gradient(cmap="coolwarm",vmin=-1,vmax=1).format("{:.2f}"),
-                                         use_container_width=True)
+                            st.dataframe(
+                                corr_m.style
+                                      .background_gradient(cmap="coolwarm", vmin=-1, vmax=1)
+                                      .format("{:.2f}"),
+                                use_container_width=True,
+                            )
 
                     except Exception as e:
                         st.error(f"Error: {e}")
                         import traceback; st.code(traceback.format_exc())
-
         # ── Financial Analysis ───────────────────────────────────────────────
         elif sector_tab == "Financial Analysis":
             st.markdown(f"## **Financial Analysis** — {sector_name}")
