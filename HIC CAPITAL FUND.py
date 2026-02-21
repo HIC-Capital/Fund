@@ -558,14 +558,14 @@ st.markdown("""
 st.sidebar.title("Navigation")
 
 try:
-    st.sidebar.image("HIC_Capital_Logo.png", wid=True)
+    st.sidebar.image("HIC_Capital_Logo.png", width='stretch')
     st.sidebar.markdown("---")
 except Exception:
     st.sidebar.markdown("### Portfolio Dashboard")
     st.sidebar.markdown("---")
 
-if st.sidebar.button("🏠 Home",           width="100%"): st.session_state.main_page = "Home"
-if st.sidebar.button("📋 Transactions",   width="100%"): st.session_state.main_page = "Transactions"
+if st.sidebar.button("🏠 Home",           width='stretch'): st.session_state.main_page = "Home"
+if st.sidebar.button("📋 Transactions",   width='stretch'): st.session_state.main_page = "Transactions"
 
 if "main_page" not in st.session_state:
     st.session_state.main_page = "Home"
@@ -574,12 +574,12 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 
 # Keys are plain sector names
-if st.sidebar.button("📱 TMT",            width="100%"): st.session_state.main_page = "TMT"
-if st.sidebar.button("🏦 FIG",            width="100%"): st.session_state.main_page = "FIG"
-if st.sidebar.button("🏭 Industrials",    width="100%"): st.session_state.main_page = "Industrials"
-if st.sidebar.button("⚡ PUI",            width="100%"): st.session_state.main_page = "PUI"
-if st.sidebar.button("🛒 Consumer Goods", width="100%"): st.session_state.main_page = "Consumer Goods"
-if st.sidebar.button("🏥 Healthcare",     width="100%"): st.session_state.main_page = "Healthcare"
+if st.sidebar.button("📱 TMT",            width='stretch'): st.session_state.main_page = "TMT"
+if st.sidebar.button("🏦 FIG",            width='stretch'): st.session_state.main_page = "FIG"
+if st.sidebar.button("🏭 Industrials",    width='stretch'): st.session_state.main_page = "Industrials"
+if st.sidebar.button("⚡ PUI",            width='stretch'): st.session_state.main_page = "PUI"
+if st.sidebar.button("🛒 Consumer Goods", width='stretch'): st.session_state.main_page = "Consumer Goods"
+if st.sidebar.button("🏥 Healthcare",     width='stretch'): st.session_state.main_page = "Healthcare"
 
 main_page = st.session_state.main_page
 
@@ -634,7 +634,7 @@ if main_page == "Transactions":
 
     st.dataframe(
         display_tx[["Date", "Ticker", "Action", "Quantity", "Currency", "Exec Price", "Gross Value"]],
-        width="100%", hide_index=True
+        width='stretch', hide_index=True
     )
 
     st.markdown("---")
@@ -651,7 +651,7 @@ if main_page == "Transactions":
             "Net Position": net, "Status": "🟢 Open" if net > 0 else "🔴 Closed",
         })
     summary_df = pd.DataFrame(rows).sort_values("YF Ticker")
-    st.dataframe(summary_df, width="100%", hide_index=True)
+    st.dataframe(summary_df, width='stretch', hide_index=True)
 
     st.markdown("---")
     st.markdown("**Transaction Timeline**")
@@ -691,7 +691,7 @@ if main_page == "Transactions":
         title="Buy & Sell Events (bubble size = trade value in USD, all currencies converted)",
         xaxis_title="Date", yaxis_title="Ticker", height=520, template="plotly_white",
     )
-    st.plotly_chart(fig, width="100%")
+    st.plotly_chart(fig, width='stretch')
 
 # =============================================================================
 # HOME PAGE
@@ -706,15 +706,15 @@ elif main_page == "Home":
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Generic Summary\n\nKey metrics, performance vs MSCI World, portfolio treemap",
-                     key="gen_summary", width="100%"):
+                     key="gen_summary", width='stretch'):
             st.session_state.home_tab = "Generic Summary"
     with col2:
         if st.button("Portfolio Structure\n\nSector, geographical, and asset distribution",
-                     key="portfolio_struct", width="100%"):
+                     key="portfolio_struct", width='stretch'):
             st.session_state.home_tab = "Portfolio Structure Analysis"
     with col3:
         if st.button("Forecast (still under dev.) \n\nMonte Carlo, analyst targets, DCF analysis",
-                     key="forecast", width="100%"):
+                     key="forecast", width='stretch'):
             st.session_state.home_tab = "Forecast"
 
     st.markdown("---")
@@ -942,7 +942,7 @@ elif main_page == "Home":
                         hovermode="x unified", height=520, template="plotly_white",
                         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
                     )
-                    st.plotly_chart(fig_perf, width="100%")
+                    st.plotly_chart(fig_perf, width='stretch')
 
                     final_nav    = nav_series.iloc[-1]
                     final_cash   = cash_series.iloc[-1]
@@ -1037,7 +1037,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                     )
                     ht = ht[["name","ticker","currency","Native Price","USD Price","Weight (%)","Return (%)","Value (USD)"]]
                     ht.columns = ["Company","Ticker","Native Ccy","Native Price","USD Price","Weight","Return","Value (USD)"]
-                    st.dataframe(ht.sort_values("Return", ascending=False), width="100%", hide_index=True)
+                    st.dataframe(ht.sort_values("Return", ascending=False), width='stretch', hide_index=True)
 
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
@@ -1231,7 +1231,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                color_discrete_sequence=blue, hole=0.4)
                 fig_s.update_traces(textposition="inside", textinfo="percent+label")
                 fig_s.update_layout(height=400)
-                st.plotly_chart(fig_s, width="100%")
+                st.plotly_chart(fig_s, width='stretch')
             with c2:
                 st.markdown("### **Sector Breakdown**")
                 for _, r in sec_data.sort_values("Weight (%)", ascending=False).iterrows():
@@ -1251,7 +1251,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 fig_map.update_geos(showcountries=True, countrycolor="lightgray",
                                     showcoastlines=True, projection_type="natural earth")
                 fig_map.update_layout(height=450, margin=dict(l=0,r=0,t=40,b=0))
-                st.plotly_chart(fig_map, width="100%")
+                st.plotly_chart(fig_map, width='stretch')
             with c2:
                 st.markdown("### **Regional Allocation**")
                 reg_alloc = df_an.groupby("region")["weight"].sum().reset_index()
@@ -1261,7 +1261,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 st.markdown("---")
                 st.markdown("### **Top Countries**")
                 st.dataframe(cnt_alloc[["Country","Weight (%)"]].sort_values("Weight (%)", ascending=False)
-                             .style.format({"Weight (%)":"{:.1f}%"}), width="100%", hide_index=True)
+                             .style.format({"Weight (%)":"{:.1f}%"}), width='stretch', hide_index=True)
 
             st.markdown("### **Additional Analysis**")
             c1, c2 = st.columns(2)
@@ -1272,7 +1272,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                 title="Market Cap Distribution (% of NAV)", color="Weight (%)",
                                 color_continuous_scale=[[0,"#DBEAFE"],[0.5,"#3B82F6"],[1,"#0F1D64"]])
                 fig_mc.update_layout(height=350, showlegend=False)
-                st.plotly_chart(fig_mc, width="100%")
+                st.plotly_chart(fig_mc, width='stretch')
             with c2:
                 cur_data = df_an.groupby("currency")["weight"].sum().reset_index()
                 cur_data.columns = ["Currency","Weight (%)"]
@@ -1286,7 +1286,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                  color_discrete_sequence=blue)
                 fig_cur.update_traces(textposition="inside", textinfo="percent+label")
                 fig_cur.update_layout(height=350)
-                st.plotly_chart(fig_cur, width="100%")
+                st.plotly_chart(fig_cur, width='stretch')
 
             st.markdown("### **Concentration Metrics**")
             df_sorted  = df_an.sort_values("weight", ascending=False)
@@ -1305,7 +1305,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
             th["value_usd"] = th["value_usd"].apply(lambda x: f"${x:,.0f}")
             th["weight"]    = th["weight"].apply(lambda x: f"{x:.2f}%")
             th.columns = ["Company","Sector","Country","Native Ccy","Value (USD)","Weight (% NAV)"]
-            st.dataframe(th, width="100%", hide_index=True)
+            st.dataframe(th, width='stretch', hide_index=True)
 
             st.markdown("### **Portfolio Summary** (USD)")
             c1, c2, c3, c4 = st.columns(4)
@@ -1395,7 +1395,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                         fig.update_layout(title=f"Monte Carlo: {num_sim} scenarios over {time_h} days (USD)",
                                           xaxis_title="Days", yaxis_title="Portfolio Value (USD)",
                                           height=500, hovermode="x unified")
-                        st.plotly_chart(fig, width="100%")
+                        st.plotly_chart(fig, width='stretch')
 
                         c1, c2, c3, c4 = st.columns(4)
                         for col, val, label in [(c1,p5[-1],"Bear (5th)"),(c2,p50[-1],"Base (50th)"),
@@ -1448,14 +1448,14 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                 for col in ["Current Price (USD)","Target Price (USD)","Current Value (USD)","Projected Value (USD)","Potential Gain (USD)"]:
                     dd[col] = dd[col].apply(lambda x: f"${x:,.2f}")
                 dd["Upside/Downside"] = dd["Upside/Downside"].apply(lambda x: f"{x:.1f}%")
-                st.dataframe(dd, width="100%", hide_index=True)
+                st.dataframe(dd, width='stretch', hide_index=True)
                 fig = go.Figure(go.Bar(
                     x=da["Ticker"], y=da["Upside/Downside"],
                     marker_color=["green" if x > 0 else "red" for x in da["Upside/Downside"]],
                     text=[f"{x:.1f}%" for x in da["Upside/Downside"]], textposition="outside",
                 ))
                 fig.update_layout(title="Analyst Consensus: Upside/Downside (USD-normalised)", height=400, showlegend=False)
-                st.plotly_chart(fig, width="100%")
+                st.plotly_chart(fig, width='stretch')
             else:
                 st.warning("No analyst consensus data available.")
 
@@ -1507,7 +1507,7 @@ Alpha **{outperf:+.2f}%** | Cash drag **{cash_pct:.1f}%** of NAV
                                  f"Projected FCF ({ccy_sel})": f"{pf[y]/1e6:.1f}M",
                                  "Discount Factor": f"{1/(1+wacc_/100)**(y+1):.4f}",
                                  f"Present Value ({ccy_sel})": f"{pv[y]/1e6:.1f}M"} for y in range(py)]
-                    st.dataframe(pd.DataFrame(dcf_rows), width="100%", hide_index=True)
+                    st.dataframe(pd.DataFrame(dcf_rows), width='stretch', hide_index=True)
 
                     if ud > 20:    st.success(f"Undervalued by {ud:.1f}%")
                     elif ud < -20: st.error(f"Overvalued by {abs(ud):.1f}%")
@@ -1533,15 +1533,15 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
         st.markdown("### **Select Analysis Type**")
         c1, c2, c3 = st.columns(3)
         with c1:
-            if st.button("Performance Analysis", key=f"perf_{sector_name}", width="100%"):
+            if st.button("Performance Analysis", key=f"perf_{sector_name}", width='stretch'):
                 st.session_state.sector_tab = "Performance Analysis"
                 st.rerun()
         with c2:
-            if st.button("Financial Analysis", key=f"fin_{sector_name}", width="100%"):
+            if st.button("Financial Analysis", key=f"fin_{sector_name}", width='stretch'):
                 st.session_state.sector_tab = "Financial Analysis"
                 st.rerun()
         with c3:
-            if st.button("Company Specific", key=f"spec_{sector_name}", width="100%"):
+            if st.button("Company Specific", key=f"spec_{sector_name}", width='stretch'):
                 st.session_state.sector_tab = "Company Specific"
                 st.rerun()
 
@@ -1722,7 +1722,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                             yaxis_title="Normalised Value (Base = 100)",
                             xaxis_title="Date",
                         )
-                        st.plotly_chart(fig, width="100%")
+                        st.plotly_chart(fig, width='stretch')
 
                         st.markdown("### **Holdings Performance Breakdown** (USD)")
                         hp = []
@@ -1749,7 +1749,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                             pdf.style
                                .format({"Return (%)": "{:.2f}%", "Weight (%)": "{:.2f}%", "Contribution (%)": "{:.2f}%"})
                                .background_gradient(subset=["Return (%)"], cmap="RdYlGn"),
-                            hide_index=True, width="100%",
+                            hide_index=True, width='stretch',
                         )
 
                         st.markdown("### **Risk Metrics**")
@@ -1771,7 +1771,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                                 corr_m.style
                                       .background_gradient(cmap="coolwarm", vmin=-1, vmax=1)
                                       .format("{:.2f}"),
-                                width="100%",
+                                width='stretch',
                             )
 
                     except Exception as e:
@@ -1857,21 +1857,21 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                                                  line=dict(color="#FFA500", width=1.5, dash="dashdot")))
                     fig.update_layout(title=title, height=400, showlegend=True,
                                       hovermode="x unified", template="plotly_white")
-                    (c1 if idx % 2 == 0 else c2).plotly_chart(fig, width="100%")
+                    (c1 if idx % 2 == 0 else c2).plotly_chart(fig, width='stretch')
 
                 st.markdown("### **Comprehensive Financial Summary**")
-                st.dataframe(fin_df.fillna("N/A"), hide_index=True, width="100%")
+                st.dataframe(fin_df.fillna("N/A"), hide_index=True, width='stretch')
 
                 st.markdown("### **Sector Statistics**")
                 nd = fin_df.select_dtypes(include=[np.number])
                 if not nd.empty:
                     st.dataframe(nd.describe().T[["mean","50%","min","max","std"]].rename(columns={"50%":"median"}),
-                                 width="100%")
+                                 width='stretch')
 
                 if ind_avgs:
                     st.markdown("### **Industry Benchmark Medians**")
                     bm_df = pd.DataFrame([{"Ratio": k, "Industry Median": round(v, 2)} for k, v in ind_avgs.items()])
-                    st.dataframe(bm_df, hide_index=True, width="100%")
+                    st.dataframe(bm_df, hide_index=True, width='stretch')
 
         # ── Company Specific ─────────────────────────────────────────────────
         elif sector_tab == "Company Specific":
@@ -1899,7 +1899,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                     tx_display = tx_stock.copy()
                     tx_display["Date"] = tx_display["Date"].dt.strftime("%Y-%m-%d")
                     st.dataframe(tx_display[["Date","Ticker","Action","Quantity"]],
-                                 width="100%", hide_index=True)
+                                 width='stretch', hide_index=True)
 
                     tx_stock_sorted = tx_stock.sort_values("Date")
                     running = 0
@@ -1912,7 +1912,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                     fig_tx.update_layout(title="Running Net Position Over Time",
                                          xaxis_title="Date", yaxis_title="Net Shares Held",
                                          height=300, template="plotly_white")
-                    st.plotly_chart(fig_tx, width="100%")
+                    st.plotly_chart(fig_tx, width='stretch')
 
                 st.markdown("---")
                 st.markdown(f"### **Stock Price Analysis** ({ccy})")
@@ -1985,7 +1985,7 @@ elif main_page in ["TMT", "FIG", "Industrials", "PUI", "Consumer Goods", "Health
                                     dict(count=1,label="1Y",step="year",stepmode="backward"),
                                     dict(step="all",label="All"),
                                 ]))
-                                st.plotly_chart(fig, width="100%")
+                                st.plotly_chart(fig, width='stretch')
 
                                 cur_p    = float(cl.iloc[-1])
                                 pp       = cinfo["purchase_price"]
