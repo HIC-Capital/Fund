@@ -6,3 +6,4 @@ scipy
 numpy
 matplotlib
 openpyxl
+streamlit>=1.42.0
