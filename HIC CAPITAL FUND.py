@@ -740,7 +740,7 @@ elif main_page == "Home":
             else:
                 try:
                     with st.spinner("Fetching market data and FX rates…"):
-                        msci_world = yf.download("MWEQ.MI", start=start_date, end=end_date, progress=False)
+                        msci_world = yf.download("URTH", start=start_date, end=end_date, progress=False)
                         msci_close = (msci_world["Close"].iloc[:, 0]
                                       if isinstance(msci_world["Close"], pd.DataFrame)
                                       else msci_world["Close"])
