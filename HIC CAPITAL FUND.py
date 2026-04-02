@@ -604,7 +604,7 @@ if st.sidebar.button("📋 Transactions",   width='stretch'): st.session_state.m
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sectors")
 for label, key in [("📱 TMT","TMT"),("🏦 FIG","FIG"),("🏭 Industrials","Industrials"),
-                    ("⚡ PUI","PUI"),("🛒 Consumer Goods","Consumer Goods"),("🏥 Healthcare","Healthcare")]:
+                    ("⚡ PUI","PUI"),("🛒 Consumer Goods","Consumer Goods"),("🏥 Healthcare","Healthcare"),("🏢 Real Estate,"Real Estate")]:
     if st.sidebar.button(label, width='stretch'): st.session_state.main_page = key
 
 main_page = st.session_state.main_page
