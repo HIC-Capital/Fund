@@ -1246,7 +1246,7 @@ elif main_page == "Home":
 # =============================================================================
 # SECTOR PAGES
 # =============================================================================
-elif main_page in ["TMT","FIG","Industrials","PUI","Consumer Goods","Healthcare"]:
+elif main_page in ["TMT","FIG","Industrials","PUI","Consumer Goods","Healthcare","Real Estate"]:
     sector_name     = main_page
     sector_holdings = {k: v for k, v in portfolio.items() if v["sector"] == sector_name}
 
