@@ -26,7 +26,7 @@ SECTOR_ETFS = {
     "PUI":            "WMTS.AS",
     "Consumer Goods": "WCOD.AS",
     "Healthcare":     "WHCS.AS",
-    "Real Estate":    "WREI.AS",
+    "Real Estate":    "FREL",
     "Energy":         "WENS.L",
     "Utilities":      "WUTY.AS",
 }
@@ -43,7 +43,7 @@ SECTOR_PROXIES = {
     "WMTS.AS": ["LIN","APD","ECL","SHW","BHP","RIO","GLEN.L","NEM","FCX","ALB"],
     "WCOD.AS": ["PG","COST","WMT","KO","PEP","NESN.SW","ULVR.L","2914.T","OR.PA","PM"],
     "WHCS.AS": ["LLY","UNH","JNJ","MRK","ABBV","NVO","NOVN.SW","AZN","TMO","DHR"],
-    "WREI.AS": ["AMT","PLD","EQIX","PSA","8951.T","GMG.AX","CCI","DLR","O","SPG"],
+    "FREL": ["AMT","PLD","EQIX","PSA","8951.T","GMG.AX","CCI","DLR","O","SPG"],
     "WENS.L":  ["XOM","CVX","SHEL","BP","TTE","COP","SLB","ENB","EOG","EQNR"],
     "WUTY.AS": ["NEE","DUK","SO","ENEL.MI","IBE.MC","SSE.L","EXC","AEP","RWE.DE","XEL"],
     "URTH":    ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","ASML","JPM","LLY"],
